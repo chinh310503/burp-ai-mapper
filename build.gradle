@@ -1,0 +1,56 @@
+plugins {
+    id 'java'
+    // Produces a single fat JAR with bundled dependencies (Burp loads one JAR).
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+group = 'com.msn'
+version = '0.1.0'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    // Build WITH JDK 21 ...
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    // ... but emit Java 17 bytecode so the JAR loads on every currently supported
+    // Burp release (older Burp bundles a Java 17 runtime; too-new bytecode fails
+    // with UnsupportedClassVersionError). Lower this to 11 for even wider reach.
+    options.release = 17
+    options.encoding = 'UTF-8'
+}
+
+dependencies {
+    // Montoya API is provided by Burp at runtime -> compileOnly, and pinned LOW.
+    // The Montoya version number is the MINIMUM Burp version it is compatible with,
+    // so keeping it low maximizes backward compatibility.
+    compileOnly 'net.portswigger.burp.extensions:montoya-api:2023.12.1'
+
+    // Selenium drives the user's installed Chrome/Chromium/Edge. Selenium Manager
+    // auto-resolves the matching driver on first run (no manual driver install).
+    // Bundled into the fat JAR so the extension is self-contained.
+    implementation 'org.seleniumhq.selenium:selenium-java:4.25.0'
+
+    // Bundled too (relocated to avoid clashing with other extensions' gson).
+    implementation 'com.google.code.gson:gson:2.10.1'
+}
+
+shadowJar {
+    archiveClassifier.set('')          // output: build/libs/burp-ai-mapper-0.1.0.jar
+    // Relocate ONLY gson. Selenium is left in place because it relies on
+    // ServiceLoader/manifest lookups that relocation can break.
+    relocate 'com.google.gson', 'com.msn.aimapper.shaded.gson'
+    mergeServiceFiles()               // keep Selenium's META-INF/services entries
+}
+
+// `gradle build` should produce the loadable fat JAR.
+// (The Python sidecar under src/main/resources/sidecar is bundled automatically.)
+tasks.named('build') {
+    dependsOn tasks.named('shadowJar')
+}
