@@ -50,7 +50,7 @@ shadowJar {
 }
 
 // `gradle build` should produce the loadable fat JAR.
-// (The Python sidecar under src/main/resources/sidecar is bundled automatically.)
+// Everything runs in-process (Selenium-driven Chrome); there is no Python sidecar.
 tasks.named('build') {
     dependsOn tasks.named('shadowJar')
 }

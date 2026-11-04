@@ -107,17 +107,27 @@ public class BrowserAgent {
             + ".map(a => a.href));";
 
     /**
-     * Destructive tokens in a URL path/query. Matched between word separators so
-     * {@code /products/1/delete}, {@code ?action=delete}, {@code /logout} all hit,
-     * while a benign {@code /deletion-policy} page does not (token must stand alone
-     * between separators). This is a SAFETY guard, so it errs toward blocking.
+     * HARD-destructive tokens in a URL path/query: a plain GET to these typically
+     * mutates server state, so we never navigate to or queue them. Matched between
+     * word separators so {@code /products/1/delete}, {@code ?action=delete},
+     * {@code /logout} all hit, while a benign {@code /deletion-policy} page does not.
+     *
+     * <p>NOTE: financial words ({@code pay/payment/checkout/charge/...}) are
+     * deliberately NOT here. {@code /checkout} and {@code /payment} are usually
+     * read-only PAGES worth mapping; navigating to them is safe. The actual
+     * money-moving action is a button/submit, which is caught by
+     * {@link #DESTRUCTIVE_TEXT} at click time instead. This keeps us from losing
+     * pages while still never pressing "Pay"/"Place order".</p>
      */
     private static final Pattern DESTRUCTIVE_URL = Pattern.compile(
             "(?i)(^|[/?&=._-])(delete|destroy|remove|drop|truncate|wipe|purge|erase|"
-            + "deactivate|revoke|logout|log-?out|sign-?out|signout|reset|"
-            + "pay|payment|checkout|charge|refund|withdraw|transfer)([/?&=._-]|$)");
+            + "deactivate|revoke|logout|log-?out|sign-?out|signout|reset)([/?&=._-]|$)");
 
-    /** Destructive wording on a button/link/control. */
+    /**
+     * Destructive wording on a button/link/control. This is where financial
+     * actions are blocked: a control labelled "Pay"/"Checkout"/"Place order" is
+     * never clicked, even though the {@code /checkout} PAGE itself may be visited.
+     */
     private static final Pattern DESTRUCTIVE_TEXT = Pattern.compile(
             "(?i)\\b(delete|destroy|remove|discard|drop|wipe|purge|erase|deactivate|"
             + "revoke|log\\s?out|sign\\s?out|reset|pay(\\s?now)?|check\\s?out|"
@@ -127,6 +137,52 @@ public class BrowserAgent {
     private final Consumer<String> log;
     private volatile boolean stop;
     private volatile ChromeDriver driver;
+    /** The account the current pass must log in as (null = prompt-driven single pass). */
+    private volatile Account activeAccount;
+
+    /** One parsed login from the TASK prompt. */
+    record Account(String username, String password, String label) {
+        String display() {
+            return (label == null || label.isBlank()) ? username : username + " [" + label + "]";
+        }
+    }
+
+    /**
+     * Strict, full-line pattern for an account line, e.g.
+     * {@code - user1 / password1  (role: admin)} or {@code user@demo.test / Passw0rd!}.
+     * Must match the WHOLE line so prose like "Do not log out or delete data." never
+     * matches. Neither token may contain a slash or whitespace (so URLs don't match).
+     */
+    private static final Pattern ACCOUNT_LINE = Pattern.compile(
+            "(?m)^\\s*[-*]?\\s*([^\\s/():]+)\\s*/\\s*([^\\s/()]+)\\s*(?:\\(([^)]*)\\))?\\s*$");
+
+    /**
+     * Pull login accounts out of the free-text TASK prompt. Returns them in the
+     * order written (so "admin" listed first is crawled first). Empty if none are
+     * recognised, in which case the agent does one prompt-driven pass as before.
+     */
+    static java.util.List<Account> parseAccounts(String prompt) {
+        java.util.List<Account> out = new java.util.ArrayList<>();
+        if (prompt == null || prompt.isBlank()) {
+            return out;
+        }
+        java.util.regex.Matcher m = ACCOUNT_LINE.matcher(prompt);
+        while (m.find()) {
+            String user = m.group(1).trim();
+            String pass = m.group(2).trim();
+            String rawLabel = m.group(3) == null ? "" : m.group(3).trim();
+            if (user.length() < 2 || pass.length() < 2) {
+                continue;
+            }
+            if (user.contains("://") || pass.contains("://")) {
+                continue;
+            }
+            // Normalise "role: admin" -> "admin"; keep anything else as-is.
+            String label = rawLabel.replaceFirst("(?i)^role\\s*[:=]\\s*", "").trim();
+            out.add(new Account(user, pass, label));
+        }
+        return out;
+    }
 
     public BrowserAgent(Consumer<String> log) {
         this.log = log;
@@ -153,9 +209,6 @@ public class BrowserAgent {
             driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(30));
             driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(2));
 
-            log.accept("[agent] Opening " + cfg.targetUrl);
-            driver.get(cfg.targetUrl);
-
             String targetHost = hostOf(cfg.targetUrl);
             Pattern extraBlock = compileExtra(cfg.extraBlockKeywords);
             if (cfg.blockDestructive) {
@@ -167,6 +220,40 @@ public class BrowserAgent {
                         + "the agent may delete data, log out or pay. Use only on a "
                         + "throwaway test environment.");
             }
+
+            // Multi-account: if the TASK lists several accounts, crawl each in its
+            // OWN session (one privilege tier per pass). Between passes we clear the
+            // cookies in CODE and log back in as the next account -- this is a
+            // managed re-auth, NOT the kind of "logout" the destructive guard blocks,
+            // so exploring both tiers no longer conflicts with the safety guard.
+            // All passes flow through the same Burp proxy, so the site map (and thus
+            // the export) already merges every tier's traffic automatically.
+            java.util.List<Account> passes = parseAccounts(cfg.prompt);
+            if (passes.isEmpty()) {
+                passes = java.util.Collections.singletonList(null); // single prompt-driven pass
+            } else if (passes.size() > 1) {
+                log.accept("[agent] " + passes.size() + " accounts detected -> crawling each "
+                        + "privilege tier in its own session (up to " + cfg.maxSteps + " steps each).");
+            }
+
+            int totalVisited = 0;
+            int totalBlocked = 0;
+            for (int pass = 0; pass < passes.size() && !stop; pass++) {
+            Account acct = passes.get(pass);
+            activeAccount = acct;
+            if (pass > 0) {
+                log.accept("[agent] Switching session to account '" + acct.display()
+                        + "' (clearing cookies then re-authenticating in code - "
+                        + "this is a managed re-auth, not a blocked logout).");
+                try {
+                    driver.manage().deleteAllCookies();
+                } catch (RuntimeException ignored) {
+                }
+            }
+            log.accept("[agent] Opening " + cfg.targetUrl
+                    + (acct != null ? "  (account: " + acct.display() + ")" : ""));
+            gotoUrl(cfg.targetUrl);
+
             Set<String> visited = new LinkedHashSet<>();            // URLs navigated to
             Set<String> done = new LinkedHashSet<>();               // action signatures
             LinkedHashSet<String> frontier = new LinkedHashSet<>(); // in-scope URLs discovered, unvisited
@@ -296,10 +383,18 @@ public class BrowserAgent {
                 }
                 sleep(900);
             }
-            log.accept("[agent] Finished. Visited " + visited.size() + " URLs across "
-                    + shapeSeen.size() + " distinct URL shapes, " + frontier.size()
-                    + " still queued, " + done.size() + " distinct actions, "
-                    + blocked + " destructive actions blocked. "
+            log.accept("[agent] Pass " + (pass + 1) + "/" + passes.size()
+                    + (acct != null ? " [" + acct.display() + "]" : "")
+                    + " done: visited " + visited.size() + " URLs across "
+                    + shapeSeen.size() + " shapes, " + frontier.size() + " still queued, "
+                    + done.size() + " distinct actions, " + blocked + " destructive blocked.");
+            totalVisited += visited.size();
+            totalBlocked += blocked;
+            } // end per-account pass
+
+            log.accept("[agent] Finished " + passes.size() + " pass(es). Visited "
+                    + totalVisited + " URLs total, " + totalBlocked
+                    + " destructive actions blocked. "
                     + "Switch to Burp and click 'Export sitemap' / 'Export OpenAPI'.");
         } catch (WebDriverException e) {
             log.accept("[agent] Browser error: " + e.getMessage()
@@ -356,6 +451,19 @@ public class BrowserAgent {
                                     Deque<String> recent, int step) {
         StringBuilder sb = new StringBuilder();
         sb.append("TASK:\n").append(cfg.prompt).append("\n\n");
+        Account acct = activeAccount;
+        if (acct != null) {
+            sb.append("ACTIVE ACCOUNT FOR THIS PASS: username=").append(acct.username())
+                    .append("  password=").append(acct.password());
+            if (acct.label() != null && !acct.label().isBlank()) {
+                sb.append("  (").append(acct.label()).append(')');
+            }
+            sb.append('\n')
+                    .append("You are in a FRESH session. If you are not yet logged in as THIS exact "
+                            + "account, find the login form and submit these credentials FIRST, then "
+                            + "explore everything this account can reach. Ignore the other accounts "
+                            + "listed in the TASK during this pass.\n\n");
+        }
         sb.append("STEP ").append(step).append(" / ").append(cfg.maxSteps).append('\n');
         sb.append("CURRENT URL: ").append(url).append('\n');
         sb.append("TITLE: ").append(title).append('\n');
@@ -627,7 +735,17 @@ public class BrowserAgent {
             return "";
         }
         int h = u.indexOf('#');
-        return h >= 0 ? u.substring(0, h) : u;
+        if (h < 0) {
+            return u;
+        }
+        // Keep client-side ROUTE hashes (#/path, #!/path) as distinct URLs so SPA
+        // hash routing (e.g. /app#/settings, /app#/billing) is crawled; drop plain
+        // in-page anchor fragments (#section, #reviews) that are not new pages.
+        String frag = u.substring(h + 1);
+        if (frag.startsWith("/") || frag.startsWith("!/") || frag.startsWith("!")) {
+            return u;
+        }
+        return u.substring(0, h);
     }
 
     /** Stable-ish fingerprint of an action, used to detect repeats / stagnation. */

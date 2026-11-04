@@ -7,11 +7,11 @@ import com.msn.aimapper.ui.MapperTab;
 /**
  * Entry point for the "AI Sitemap &amp; API Mapper" Burp extension.
  *
- * <p>The extension drives an external AI browsing agent (browser-use, run as a
- * Python sidecar) whose browser is pointed at Burp's own proxy listener. The
- * agent logs in and explores the target automatically; every request flows
- * through Burp and lands in the site map. The extension then reads that site
- * map and exports a sitemap and an OpenAPI 3.1 document.</p>
+ * <p>The extension drives an in-process AI browsing agent (Selenium-controlled
+ * Chrome/Chromium/Edge, no external sidecar) whose browser is pointed at Burp's
+ * own proxy listener. The agent logs in and explores the target automatically;
+ * every request flows through Burp and lands in the site map. The extension then
+ * reads that site map and exports a sitemap and an OpenAPI 3.1 document.</p>
  */
 public class AiMapperExtension implements BurpExtension {
 
