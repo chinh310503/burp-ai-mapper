@@ -78,7 +78,8 @@ public final class SitemapGenerator {
                 sb.append("  <!-- ").append(xmlComment(e.getKey()))
                         .append(" (").append(urls.size()).append(" URLs) -->\n");
             }
-            sb.append("  <url><loc>").append(xmlEscape(urls.first())).append("</loc></url>\n");
+            sb.append("  <url><loc>").append(xmlEscape(Redactor.redactUrl(urls.first())))
+                    .append("</loc></url>\n");
         }
         sb.append("</urlset>\n");
         Files.write(file, sb.toString().getBytes(StandardCharsets.UTF_8));
@@ -117,7 +118,7 @@ public final class SitemapGenerator {
                 if (n++ >= 3) {
                     break;
                 }
-                sample.add(u);
+                sample.add(Redactor.redactUrl(u));
             }
             o.add("examples", sample);
             arr.add(o);
@@ -142,7 +143,7 @@ public final class SitemapGenerator {
             }
             JsonObject o = new JsonObject();
             o.addProperty("method", req.method());
-            o.addProperty("url", req.url());
+            o.addProperty("url", Redactor.redactUrl(req.url()));
             HttpResponse resp = rr.response();
             o.addProperty("status", resp != null ? (int) resp.statusCode() : 0);
             o.addProperty("contentType", resp != null ? contentType(resp) : "");
@@ -159,7 +160,7 @@ public final class SitemapGenerator {
             }
             JsonObject o = new JsonObject();
             o.addProperty("method", "GET");
-            o.addProperty("url", u);
+            o.addProperty("url", Redactor.redactUrl(u));
             o.addProperty("status", 0);
             o.addProperty("contentType", "");
             o.addProperty("source", "crawler-client-route");

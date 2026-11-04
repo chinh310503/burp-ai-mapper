@@ -136,6 +136,20 @@ proxy đã bắt để nhắm cái mới; đạt cả 2 tier.
 **Nghiệm thu P3**: `openapi.json` import được vào Swagger UI không lỗi; spec có schema
 body/response; không lộ secret; bảng điểm hiện coverage từng nhóm.
 
+**Trạng thái**: P3 đã triển khai trên branch `p0-safety-and-coverage-fixes`. Gồm:
+- `OpenApiGenerator` viết lại: suy luận **schema JSON đệ quy** cho request + **response body**
+  (đọc từ Burp), **gộp nhiều mẫu** (union properties, `required` = giao của các mẫu, nullable),
+  **security scheme** (cookie/bearer quan sát được) + root `security`, **tags** theo segment đầu.
+- `Redactor` mới: che secret (password/token/key/session/sig…) trong URL (`urls.json`,
+  `sitemap.xml`, `endpoints.json`) và body example (`openapi.json`) — JSON đệ quy hoặc
+  cặp `key=value`.
+- Nút **"Score vs ground-truth"** + ô file: diff URL tìm được (Burp GET + client-route) với
+  `ground-truth.urls.txt`, in coverage % + danh sách MISSED theo log.
+- **Lưu/nạp cấu hình** qua `api.persistence().preferences()` (không lưu API key & prompt).
+- Build `shadowJar` PASS.
+- **Dời**: merge/giữ hand-edit của `openapi.json` khi xuất lại; trường credential riêng
+  (redaction đã che password trong body/URL; prompt vẫn gửi LLM như cũ) → P4/sau.
+
 ---
 
 ## P4 — Mở rộng (tùy chọn, sau khi lõi vững)

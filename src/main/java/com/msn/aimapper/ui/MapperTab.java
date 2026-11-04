@@ -70,6 +70,7 @@ public class MapperTab {
     private final JTextField outputDir = new JTextField();
     private final JTextField hostFilter = new JTextField();
     private final JCheckBox inScopeOnly = new JCheckBox("In-scope only", true);
+    private final JTextField groundTruth = new JTextField();
 
     private final JTextArea logArea = new JTextArea();
     private final JPanel root = new JPanel(new BorderLayout());
@@ -136,17 +137,20 @@ public class MapperTab {
         JPanel scope = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         scope.add(inScopeOnly);
         form.add(scope);
+        form.add(row("Ground-truth URLs file (optional, for scoring)", groundTruth));
 
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT));
         JButton start = new JButton("Start AI browsing");
         JButton stop = new JButton("Stop");
         JButton exSitemap = new JButton("Export sitemap");
         JButton exApi = new JButton("Export OpenAPI");
+        JButton score = new JButton("Score vs ground-truth");
         JButton clear = new JButton("Clear log");
         buttons.add(start);
         buttons.add(stop);
         buttons.add(exSitemap);
         buttons.add(exApi);
+        buttons.add(score);
         buttons.add(clear);
         form.add(Box.createVerticalStrut(8));
         form.add(buttons);
@@ -155,6 +159,7 @@ public class MapperTab {
         stop.addActionListener(e -> agent.stop());
         exSitemap.addActionListener(e -> onExportSitemap());
         exApi.addActionListener(e -> onExportApi());
+        score.addActionListener(e -> onScore());
         clear.addActionListener(e -> logArea.setText(""));
 
         logArea.setEditable(false);
@@ -168,6 +173,8 @@ public class MapperTab {
         JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, formScroll, logScroll);
         split.setResizeWeight(0.68);
         root.add(split, BorderLayout.CENTER);
+
+        loadPrefs();
     }
 
     private void onStart() {
@@ -195,6 +202,7 @@ public class MapperTab {
             log("[ui] Enter an AI API key first.");
             return;
         }
+        savePrefs();
         LlmClient llm = new LlmClient(cfg.baseUrl, cfg.apiKey, cfg.model,
                 cfg.temperature, cfg.maxTokens, cfg.jsonMode, cfg.llmRetries);
         log("[ui] Starting. Chrome will route through Burp at " + cfg.proxyEndpoint()
@@ -261,6 +269,7 @@ public class MapperTab {
             log("[export] Set an Output dir first.");
             return;
         }
+        savePrefs();
         Path outDir = Path.of(out);
         new Thread(() -> {
             try {
@@ -269,6 +278,161 @@ public class MapperTab {
                 log("[export] ERROR building " + what + ": " + ex.getMessage());
             }
         }, "ai-mapper-export").start();
+    }
+
+    /**
+     * Compare what we discovered against a ground-truth URL list (one URL per line;
+     * blank lines and {@code #} comments ignored) and print a coverage score plus the
+     * URLs that were missed. "Found" = GET URLs in Burp's site map (under the current
+     * host/scope filter) plus the agent's client-only routes.
+     */
+    private void onScore() {
+        String gt = groundTruth.getText().trim();
+        if (gt.isBlank()) {
+            log("[score] Set a Ground-truth URLs file first.");
+            return;
+        }
+        savePrefs();
+        new Thread(() -> {
+            try {
+                java.util.Set<String> truth = new java.util.TreeSet<>();
+                for (String line : java.nio.file.Files.readAllLines(Path.of(gt))) {
+                    String s = line.trim();
+                    if (!s.isEmpty() && !s.startsWith("#")) {
+                        truth.add(normalizeForScore(s));
+                    }
+                }
+                if (truth.isEmpty()) {
+                    log("[score] Ground-truth file had no URLs.");
+                    return;
+                }
+                java.util.Set<String> found = new java.util.TreeSet<>();
+                String needle = hostFilter.getText().trim().toLowerCase();
+                for (HttpRequestResponse rr : api.siteMap().requestResponses()) {
+                    var req = rr.request();
+                    if (req == null || !"GET".equalsIgnoreCase(req.method())) {
+                        continue;
+                    }
+                    String url = req.url();
+                    if (!needle.isEmpty() && !url.toLowerCase().contains(needle)) {
+                        continue;
+                    }
+                    if (inScopeOnly.isSelected()) {
+                        try {
+                            if (!api.scope().isInScope(url)) {
+                                continue;
+                            }
+                        } catch (RuntimeException ignored) {
+                            // keep on malformed URL
+                        }
+                    }
+                    found.add(normalizeForScore(url));
+                }
+                for (String u : agent.discoveredUrls()) {
+                    found.add(normalizeForScore(u));
+                }
+                java.util.Set<String> missed = new java.util.TreeSet<>(truth);
+                missed.removeAll(found);
+                int hit = truth.size() - missed.size();
+                log(String.format("[score] Coverage %d/%d = %.1f%% of ground-truth GET URLs "
+                        + "(found %d URLs total).", hit, truth.size(),
+                        100.0 * hit / truth.size(), found.size()));
+                int shown = 0;
+                for (String m : missed) {
+                    if (shown++ >= 40) {
+                        log("[score] ... and " + (missed.size() - 40) + " more missed.");
+                        break;
+                    }
+                    log("[score]   MISSED " + m);
+                }
+                if (missed.isEmpty()) {
+                    log("[score] All ground-truth URLs were found.");
+                }
+            } catch (Exception ex) {
+                log("[score] ERROR: " + ex.getMessage());
+            }
+        }, "ai-mapper-score").start();
+    }
+
+    private static String normalizeForScore(String u) {
+        if (u == null) {
+            return "";
+        }
+        String s = u.trim();
+        // Drop a trailing slash except on the bare origin root (http://host/).
+        if (s.endsWith("/") && !s.matches("(?i)https?://[^/]+/")) {
+            s = s.substring(0, s.length() - 1);
+        }
+        return s;
+    }
+
+    // --- settings persistence (via Burp's extension preferences) ---------------
+
+    private void loadPrefs() {
+        try {
+            var p = api.persistence().preferences();
+            setIf(p.getString("targetUrl"), targetUrl);
+            setIf(p.getString("baseUrl"), baseUrl);
+            String m = p.getString("model");
+            if (m != null && !m.isBlank()) {
+                model.setSelectedItem(m);
+            }
+            setIf(p.getString("proxyHost"), proxyHost);
+            setIf(p.getString("proxyPort"), proxyPort);
+            setIf(p.getString("maxSteps"), maxSteps);
+            setIf(p.getString("chromeBinary"), chromeBinary);
+            setIf(p.getString("temperature"), temperature);
+            setIf(p.getString("maxTokens"), maxTokens);
+            setIf(p.getString("extraBlockKeywords"), extraBlockKeywords);
+            setIf(p.getString("outputDir"), outputDir);
+            setIf(p.getString("hostFilter"), hostFilter);
+            setIf(p.getString("groundTruth"), groundTruth);
+            Boolean h = p.getBoolean("headless");
+            if (h != null) {
+                headless.setSelected(h);
+            }
+            Boolean b = p.getBoolean("blockDestructive");
+            if (b != null) {
+                blockDestructive.setSelected(b);
+            }
+            Boolean s = p.getBoolean("inScopeOnly");
+            if (s != null) {
+                inScopeOnly.setSelected(s);
+            }
+        } catch (RuntimeException ignored) {
+            // persistence is best-effort; ignore if unavailable
+        }
+    }
+
+    private void savePrefs() {
+        try {
+            var p = api.persistence().preferences();
+            // Secrets (API key, and the prompt which may hold passwords) are NOT saved.
+            p.setString("targetUrl", targetUrl.getText());
+            p.setString("baseUrl", baseUrl.getText());
+            p.setString("model", currentModel());
+            p.setString("proxyHost", proxyHost.getText());
+            p.setString("proxyPort", proxyPort.getText());
+            p.setString("maxSteps", maxSteps.getText());
+            p.setString("chromeBinary", chromeBinary.getText());
+            p.setString("temperature", temperature.getText());
+            p.setString("maxTokens", maxTokens.getText());
+            p.setString("extraBlockKeywords", extraBlockKeywords.getText());
+            p.setString("outputDir", outputDir.getText());
+            p.setString("hostFilter", hostFilter.getText());
+            p.setString("groundTruth", groundTruth.getText());
+            p.setBoolean("headless", headless.isSelected());
+            p.setBoolean("blockDestructive", blockDestructive.isSelected());
+            p.setBoolean("inScopeOnly", inScopeOnly.isSelected());
+        } catch (RuntimeException ignored) {
+            // persistence is best-effort; ignore if unavailable
+        }
+    }
+
+    private static void setIf(String v, JTextField field) {
+        if (v != null && !v.isEmpty()) {
+            field.setText(v);
+        }
     }
 
     private static int parseInt(String s, int def) {

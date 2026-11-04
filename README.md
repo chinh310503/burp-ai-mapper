@@ -48,7 +48,13 @@ Kết quả trong Output dir:
 - `sitemap.xml` — URL GET, **gom theo "shape"**: `/products/101..125` → **một dòng** `/products/{id}` (kèm comment số URL đã gom). Hết trùng.
 - `urls.json` — **mọi request đầy đủ** (method, url, status, content-type) — không gom, không mất gì.
 - `endpoints.json` — **danh sách API đã khử trùng**, theo `method + shape` (GET `/products/{id}` khác DELETE `/products/{id}`), kèm `count` + `examples`.
-- `openapi.json` — OpenAPI 3.1 (gom `/users/123` → `/users/{id}`, suy luận param/body/response).
+- `openapi.json` — OpenAPI 3.1 (gom `/users/123` → `/users/{id}`; suy luận **schema JSON đệ quy** cho request + **response body**, gộp nhiều mẫu với `required`/`nullable`; **security scheme** cookie/bearer quan sát được; **tags** theo segment path đầu).
+
+**Redact secret:** mọi bản xuất tự che giá trị nhạy cảm (password/token/api key/session/signature…) trong URL và body example — an toàn để chia sẻ.
+
+**Chấm điểm:** điền **Ground-truth URLs file** rồi bấm **Score vs ground-truth** để diff kết quả (URL GET của Burp + route client-only) với danh sách chuẩn và in coverage % + các URL còn thiếu.
+
+**Lưu cấu hình:** các trường (trừ API key & Task prompt) được nhớ giữa các phiên qua Burp extension preferences.
 
 > **Lọc nhiễu trình duyệt:** sitemap bạn gửi có lẫn host của Chrome (`clients2.google.com`, `content-autofill.googleapis.com`, `optimizationguide-pa…`) — đó là telemetry của Chrome, không phải app. Để loại: điền **Host filter** = host target (vd `localhost`), hoặc add target vào **Burp scope** rồi bật **In-scope only**.
 
