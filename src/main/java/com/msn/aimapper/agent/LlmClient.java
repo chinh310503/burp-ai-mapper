@@ -38,13 +38,27 @@ public class LlmClient {
     private final String baseUrl;
     private final String apiKey;
     private final String model;
+    private final double temperature;
+    private final int maxTokens;
+    private final int maxAttempts;
+    /** Whether to send response_format=json_object; auto-disabled if a provider rejects it. */
+    private volatile boolean jsonMode;
     private final HttpClient http;
     private final Gson gson = new Gson();
 
     public LlmClient(String baseUrl, String apiKey, String model) {
+        this(baseUrl, apiKey, model, 0.2, 0, true, 3);
+    }
+
+    public LlmClient(String baseUrl, String apiKey, String model, double temperature,
+                     int maxTokens, boolean jsonMode, int maxAttempts) {
         this.baseUrl = normalize(baseUrl);
         this.apiKey = apiKey;
         this.model = model;
+        this.temperature = temperature;
+        this.maxTokens = maxTokens;
+        this.jsonMode = jsonMode;
+        this.maxAttempts = Math.max(1, maxAttempts);
         this.http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(30))
                 .build();
@@ -61,11 +75,60 @@ public class LlmClient {
         return b;
     }
 
-    /** Send a chat request and return the assistant's text content. */
+    /**
+     * Send a chat request and return the assistant's text content. Retries on
+     * timeout / 429 / 5xx with backoff; gives a clear message on auth failure; and
+     * transparently drops {@code response_format} for the rest of the session if a
+     * provider rejects it (HTTP 400), so odd gateways still work.
+     */
     public String chat(List<Msg> messages) throws Exception {
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            HttpResponse<String> resp;
+            try {
+                resp = http.send(buildRequest(messages), HttpResponse.BodyHandlers.ofString());
+            } catch (java.io.IOException e) {
+                // includes HttpTimeoutException (a subclass) -> transient, retry
+                last = new RuntimeException("LLM connection error: " + e.getMessage());
+                backoff(attempt);
+                continue;
+            }
+            int sc = resp.statusCode();
+            if (sc / 100 == 2) {
+                return extractContent(resp.body());
+            }
+            if (sc == 400 && jsonMode) {
+                // Some gateways reject response_format; drop it and retry once.
+                jsonMode = false;
+                continue;
+            }
+            if (sc == 401 || sc == 403) {
+                throw new RuntimeException("LLM auth failed (HTTP " + sc
+                        + "): check the API key and Base URL. " + truncate(resp.body(), 300));
+            }
+            if (sc == 429 || sc / 100 == 5) {
+                last = new RuntimeException("LLM HTTP " + sc + ": " + truncate(resp.body(), 300));
+                backoff(attempt);
+                continue;
+            }
+            throw new RuntimeException("LLM HTTP " + sc + ": " + truncate(resp.body(), 400));
+        }
+        throw last != null ? last
+                : new RuntimeException("LLM request failed after " + maxAttempts + " attempts");
+    }
+
+    private HttpRequest buildRequest(List<Msg> messages) {
         JsonObject body = new JsonObject();
         body.addProperty("model", model);
-        body.addProperty("temperature", 0.2);
+        body.addProperty("temperature", temperature);
+        if (maxTokens > 0) {
+            body.addProperty("max_tokens", maxTokens);
+        }
+        if (jsonMode) {
+            JsonObject fmt = new JsonObject();
+            fmt.addProperty("type", "json_object");
+            body.add("response_format", fmt);
+        }
         JsonArray arr = new JsonArray();
         for (Msg m : messages) {
             JsonObject o = new JsonObject();
@@ -74,29 +137,59 @@ public class LlmClient {
             arr.add(o);
         }
         body.add("messages", arr);
-
-        HttpRequest req = HttpRequest.newBuilder()
+        return HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/chat/completions"))
                 .timeout(Duration.ofSeconds(120))
                 .header("Content-Type", "application/json")
                 .header("Authorization", "Bearer " + apiKey)
                 .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(body)))
                 .build();
+    }
 
-        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-        if (resp.statusCode() / 100 != 2) {
-            throw new RuntimeException("LLM HTTP " + resp.statusCode() + ": "
-                    + truncate(resp.body(), 500));
-        }
-
-        JsonObject root = JsonParser.parseString(resp.body()).getAsJsonObject();
+    /**
+     * Pull the assistant text out of a chat/completions response, tolerating:
+     * a plain string {@code content}, a content PARTS array (content[].text), and
+     * reasoning models that leave {@code content} null but fill {@code reasoning_content}.
+     */
+    private static String extractContent(String responseBody) {
+        JsonObject root = JsonParser.parseString(responseBody).getAsJsonObject();
         JsonArray choices = root.getAsJsonArray("choices");
         if (choices == null || choices.isEmpty()) {
-            throw new RuntimeException("LLM returned no choices: " + truncate(resp.body(), 300));
+            throw new RuntimeException("LLM returned no choices: " + truncate(responseBody, 300));
         }
         JsonObject msg = choices.get(0).getAsJsonObject().getAsJsonObject("message");
-        String content = msg.get("content").getAsString();
-        return content == null ? "" : content;
+        if (msg == null) {
+            throw new RuntimeException("LLM returned no message: " + truncate(responseBody, 300));
+        }
+        String text = "";
+        if (msg.has("content") && !msg.get("content").isJsonNull()) {
+            var c = msg.get("content");
+            if (c.isJsonPrimitive()) {
+                text = c.getAsString();
+            } else if (c.isJsonArray()) {
+                StringBuilder sb = new StringBuilder();
+                for (var part : c.getAsJsonArray()) {
+                    if (part.isJsonObject() && part.getAsJsonObject().has("text")) {
+                        sb.append(part.getAsJsonObject().get("text").getAsString());
+                    }
+                }
+                text = sb.toString();
+            }
+        }
+        if (text == null || text.isBlank()) {
+            if (msg.has("reasoning_content") && msg.get("reasoning_content").isJsonPrimitive()) {
+                text = msg.get("reasoning_content").getAsString();
+            }
+        }
+        return text == null ? "" : text;
+    }
+
+    private static void backoff(int attempt) {
+        try {
+            Thread.sleep(Math.min(1000L * attempt, 4000L));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**

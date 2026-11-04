@@ -32,6 +32,14 @@ public class AgentConfig {
     public String baseUrl = "https://api.openai.com/v1";
     public String apiKey = "";
 
+    // LLM behaviour.
+    public double temperature = 0.2;
+    public int maxTokens = 0;          // 0 = don't send max_tokens (use provider default)
+    // Ask for response_format={"type":"json_object"} so the one-action reply is always
+    // valid JSON. Auto-disables for the session if a provider rejects it (HTTP 400).
+    public boolean jsonMode = true;
+    public int llmRetries = 3;         // total attempts per call on timeout / 429 / 5xx
+
     public String proxyEndpoint() {
         return proxyHost + ":" + proxyPort;
     }

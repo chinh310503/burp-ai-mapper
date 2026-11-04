@@ -205,8 +205,10 @@ public class BrowserAgent {
             + "unsubscribe|cancel\\s?(account|subscription|order))\\b");
 
     private final Consumer<String> log;
+    private final CoverageSource coverage;   // live proxy coverage (may be null)
     private volatile boolean stop;
     private volatile ChromeDriver driver;
+    private volatile String targetHostField; // host of the current run, for coverage lookup
     /** The account the current pass must log in as (null = prompt-driven single pass). */
     private volatile Account activeAccount;
     /**
@@ -269,7 +271,12 @@ public class BrowserAgent {
     }
 
     public BrowserAgent(Consumer<String> log) {
+        this(log, null);
+    }
+
+    public BrowserAgent(Consumer<String> log, CoverageSource coverage) {
         this.log = log;
+        this.coverage = coverage;
     }
 
     public void stop() {
@@ -295,6 +302,7 @@ public class BrowserAgent {
             driver.manage().timeouts().scriptTimeout(Duration.ofSeconds(15)); // for async fetch seeds
 
             String targetHost = hostOf(cfg.targetUrl);
+            targetHostField = targetHost;
             Pattern extraBlock = compileExtra(cfg.extraBlockKeywords);
             if (cfg.blockDestructive) {
                 log.accept("[agent] SAFETY: destructive actions (delete/logout/reset/"
@@ -561,6 +569,16 @@ public class BrowserAgent {
         sb.append("TITLE: ").append(title).append('\n');
         sb.append("UNVISITED LINKS REMAINING: ").append(frontier.size()).append('\n');
         sb.append("NEXT UNVISITED (sample): ").append(firstN(frontier, 10)).append('\n');
+        CoverageSource cov = coverage;
+        if (cov != null) {
+            try {
+                Set<String> caps = cov.capturedEndpoints(targetHostField);
+                sb.append("DISTINCT ENDPOINTS THE PROXY HAS CAPTURED (").append(caps.size())
+                        .append("): ").append(firstN(caps, 12)).append('\n');
+            } catch (RuntimeException ignored) {
+                // coverage is best-effort; never let it break a step
+            }
+        }
         sb.append("VISITED URLS (").append(visited.size()).append("): ")
                 .append(lastN(visited, 10)).append('\n');
         sb.append("ALREADY DONE ACTIONS (").append(done.size()).append(") - do NOT repeat: ")

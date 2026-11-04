@@ -6,6 +6,7 @@ import com.msn.aimapper.agent.AgentConfig;
 import com.msn.aimapper.agent.BrowserAgent;
 import com.msn.aimapper.agent.LlmClient;
 import com.msn.aimapper.export.OpenApiGenerator;
+import com.msn.aimapper.export.PathTemplater;
 import com.msn.aimapper.export.SiteMapExtractor;
 import com.msn.aimapper.export.SitemapGenerator;
 
@@ -50,6 +51,8 @@ public class MapperTab {
     private final JComboBox<String> model = new JComboBox<>();
     private final JTextField baseUrl = new JTextField("https://api.openai.com/v1");
     private final JPasswordField apiKey = new JPasswordField();
+    private final JTextField temperature = new JTextField("0.2");
+    private final JTextField maxTokens = new JTextField("0");
 
     // Browser / proxy
     private final JTextField proxyHost = new JTextField("127.0.0.1");
@@ -73,7 +76,7 @@ public class MapperTab {
 
     public MapperTab(MontoyaApi api) {
         this.api = api;
-        this.agent = new BrowserAgent(this::log);
+        this.agent = new BrowserAgent(this::log, this::capturedEndpoints);
         build();
     }
 
@@ -109,6 +112,8 @@ public class MapperTab {
         form.add(modelRow());
         form.add(row("Base URL", baseUrl));
         form.add(row("API key", apiKey));
+        form.add(row("Temperature", temperature));
+        form.add(row("Max tokens (0 = provider default)", maxTokens));
 
         form.add(section("3. Browser & Burp proxy"));
         form.add(row("Proxy host", proxyHost));
@@ -172,6 +177,8 @@ public class MapperTab {
         cfg.model = currentModel();
         cfg.baseUrl = baseUrl.getText().trim();
         cfg.apiKey = new String(apiKey.getPassword());
+        cfg.temperature = parseDouble(temperature.getText(), 0.2);
+        cfg.maxTokens = parseInt(maxTokens.getText(), 0);
         cfg.proxyHost = proxyHost.getText().trim();
         cfg.proxyPort = parseInt(proxyPort.getText(), 8080);
         cfg.maxSteps = parseInt(maxSteps.getText(), 60);
@@ -188,7 +195,8 @@ public class MapperTab {
             log("[ui] Enter an AI API key first.");
             return;
         }
-        LlmClient llm = new LlmClient(cfg.baseUrl, cfg.apiKey, cfg.model);
+        LlmClient llm = new LlmClient(cfg.baseUrl, cfg.apiKey, cfg.model,
+                cfg.temperature, cfg.maxTokens, cfg.jsonMode, cfg.llmRetries);
         log("[ui] Starting. Chrome will route through Burp at " + cfg.proxyEndpoint()
                 + ". Make sure a Burp proxy listener is running there.");
         new Thread(() -> agent.run(cfg, llm), "ai-mapper-agent").start();
@@ -269,6 +277,41 @@ public class MapperTab {
         } catch (NumberFormatException e) {
             return def;
         }
+    }
+
+    private static double parseDouble(String s, double def) {
+        try {
+            return Double.parseDouble(s.trim());
+        } catch (NumberFormatException e) {
+            return def;
+        }
+    }
+
+    /**
+     * Live proxy coverage for the agent: distinct "METHOD shape" signatures Burp has
+     * captured for the given host so far. Lets the agent steer toward endpoints it
+     * has not exercised yet. Best-effort; returns an empty set on any error.
+     */
+    private java.util.Set<String> capturedEndpoints(String host) {
+        java.util.Set<String> out = new java.util.TreeSet<>();
+        try {
+            String h = host == null ? "" : host.trim();
+            for (HttpRequestResponse rr : api.siteMap().requestResponses()) {
+                var req = rr.request();
+                if (req == null) {
+                    continue;
+                }
+                String reqHost = req.httpService() != null ? req.httpService().host() : "";
+                if (!h.isEmpty() && (reqHost == null || !reqHost.equalsIgnoreCase(h))) {
+                    continue;
+                }
+                String method = req.method() == null ? "GET" : req.method().toUpperCase();
+                out.add(method + " " + PathTemplater.signature(req.url()));
+            }
+        } catch (RuntimeException ignored) {
+            // best-effort; never break the agent loop
+        }
+        return out;
     }
 
     private void log(String msg) {

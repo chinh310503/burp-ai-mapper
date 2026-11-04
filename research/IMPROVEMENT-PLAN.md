@@ -88,10 +88,15 @@ theo kết quả `comm` thực tế.
 
 ## P2 — Bắt API trực tiếp + "bộ não" agent tin cậy (đạt *Excellent*)
 
-9. **CDP network capture** (song song Burp): bật Selenium `Network` domain, log
-   request+response (kèm body JSON). Dùng để (a) làm giàu OpenAPI (response schema),
-   (b) phản hồi **coverage endpoint** cho agent. Thiết kế qua interface `TrafficSink`
-   để sau thay WebDriver BiDi. Burp vẫn là nguồn chính khi có.
+9. ~~**CDP network capture**~~ → **Coverage feedback từ Burp site map** (quyết định đã đổi).
+   **Lý do**: đây là extension Burp, Burp (proxy) đã bắt *toàn bộ* traffic kèm request/
+   response body. CDP Java bị pin version Chrome (`v131.network…`) → dễ vỡ. Nên:
+   - (b) coverage feedback: agent **query site map sống của Burp** qua interface
+     `CoverageSource` (UI implement bằng `api.siteMap()`), hiển thị "DISTINCT ENDPOINTS
+     THE PROXY HAS CAPTURED (n)" trong state → agent nhắm endpoint **chưa** chạm. ✅ đã làm.
+   - (a) response schema: đọc thẳng response body từ Burp records ở **P3** (không cần CDP).
+   - CDP/BiDi "chạy không cần Burp" (độc lập proxy) → dời xuống **P4** (tùy chọn), đằng sau
+     cùng interface nên thay dễ.
 10. **Nâng cấp LlmClient**:
     - **Structured Outputs** (strict JSON schema cho action) khi provider hỗ trợ;
       fallback: parse hiện tại + **retry** 1–2 lần khi reply hỏng.
@@ -100,8 +105,19 @@ theo kết quả `comm` thực tế.
 11. **State giàu hơn cho agent**: thêm "ENDPOINTS CAPTURED (n)", "COVERAGE ~x%",
     cho phép **multi-action/bước**. Prompt nhấn: ưu tiên feature **mới**, không enum id.
 
-**Nghiệm thu P2**: `openapi.json` có response content-type/schema từ body thật; agent
-chạy ổn định với ≥2 provider (vd OpenAI + 1 local) không vỡ vì reply lỗi; đạt cả 2 tier.
+**Nghiệm thu P2**: agent chạy ổn định, không vỡ vì reply lỗi (retry 429/5xx/timeout,
+auth-fail báo rõ, tự bỏ `response_format` nếu provider từ chối); state hiển thị số endpoint
+proxy đã bắt để nhắm cái mới; đạt cả 2 tier.
+
+**Trạng thái**: P2 (bản điều chỉnh) đã triển khai trên branch `p0-safety-and-coverage-fixes`:
+- `LlmClient` nâng cấp: retry + backoff, json mode có fallback HTTP 400, đọc content linh
+  hoạt (string / mảng parts / `reasoning_content`), lỗi 401/403 báo rõ; cấu hình
+  `temperature`/`maxTokens` (có UI) + `jsonMode`/`llmRetries` (AgentConfig).
+- `CoverageSource` + `BrowserAgent` hiển thị "DISTINCT ENDPOINTS THE PROXY HAS CAPTURED (n)"
+  trong state (UI cấp từ `api.siteMap()`). Build PASS.
+- CDP bị thay bằng coverage-từ-Burp (xem mục 9) → đỡ fragile, cùng giá trị.
+- Multi-action/bước: **dời** (rủi ro stale-index > giá trị; giữ 1-action/bước cho chắc).
+- (a) response schema đọc từ Burp body: làm ở **P3**.
 
 ---
 
