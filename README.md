@@ -126,7 +126,7 @@ burp-ai-mapper/
 
 ## Hạn chế đã biết (v0.1)
 
-- Agent điều khiển theo DOM (text + element list), chưa dùng vision; với UI rất động có thể cần tăng `Max steps` hoặc bổ sung hướng dẫn trong prompt.
+- Agent điều khiển theo DOM (text + element list). Có **Vision fallback** (checkbox, cần model có thị giác): khi trang không có element tương tác thì đính kèm screenshot cho model — mặc định tắt. Với UI rất động có thể cần tăng `Max steps`/`Samples per URL shape` hoặc bổ sung hướng dẫn trong prompt.
 - Suy luận schema OpenAPI đơn giản (string/integer/number/boolean/object); body JSON lưu dạng example.
 - Chưa parse sâu GraphQL (nhận diện theo path/content-type).
 - Pin Selenium 4.25.0 — Chrome quá mới mà Selenium quá cũ có thể lệch; nâng version trong `build.gradle` nếu cần.

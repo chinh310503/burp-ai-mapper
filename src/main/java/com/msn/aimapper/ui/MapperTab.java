@@ -58,8 +58,10 @@ public class MapperTab {
     private final JTextField proxyHost = new JTextField("127.0.0.1");
     private final JTextField proxyPort = new JTextField("8080");
     private final JTextField maxSteps = new JTextField("60");
+    private final JTextField samplesPerShape = new JTextField("2");
     private final JTextField chromeBinary = new JTextField();
     private final JCheckBox headless = new JCheckBox("Headless browser");
+    private final JCheckBox vision = new JCheckBox("Vision fallback (needs a vision-capable model)");
 
     // Safety
     private final JCheckBox blockDestructive =
@@ -120,9 +122,11 @@ public class MapperTab {
         form.add(row("Proxy host", proxyHost));
         form.add(row("Proxy port", proxyPort));
         form.add(row("Max steps", maxSteps));
+        form.add(row("Samples per URL shape", samplesPerShape));
         form.add(row("Chrome binary (optional)", chromeBinary));
         JPanel cb = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         cb.add(headless);
+        cb.add(vision);
         form.add(cb);
 
         form.add(section("4. Safety"));
@@ -189,8 +193,10 @@ public class MapperTab {
         cfg.proxyHost = proxyHost.getText().trim();
         cfg.proxyPort = parseInt(proxyPort.getText(), 8080);
         cfg.maxSteps = parseInt(maxSteps.getText(), 60);
+        cfg.samplesPerTemplate = parseInt(samplesPerShape.getText(), 2);
         cfg.chromeBinary = chromeBinary.getText().trim();
         cfg.headless = headless.isSelected();
+        cfg.vision = vision.isSelected();
         cfg.blockDestructive = blockDestructive.isSelected();
         cfg.extraBlockKeywords = extraBlockKeywords.getText().trim();
 
@@ -380,6 +386,7 @@ public class MapperTab {
             setIf(p.getString("proxyHost"), proxyHost);
             setIf(p.getString("proxyPort"), proxyPort);
             setIf(p.getString("maxSteps"), maxSteps);
+            setIf(p.getString("samplesPerShape"), samplesPerShape);
             setIf(p.getString("chromeBinary"), chromeBinary);
             setIf(p.getString("temperature"), temperature);
             setIf(p.getString("maxTokens"), maxTokens);
@@ -390,6 +397,10 @@ public class MapperTab {
             Boolean h = p.getBoolean("headless");
             if (h != null) {
                 headless.setSelected(h);
+            }
+            Boolean vis = p.getBoolean("vision");
+            if (vis != null) {
+                vision.setSelected(vis);
             }
             Boolean b = p.getBoolean("blockDestructive");
             if (b != null) {
@@ -414,6 +425,7 @@ public class MapperTab {
             p.setString("proxyHost", proxyHost.getText());
             p.setString("proxyPort", proxyPort.getText());
             p.setString("maxSteps", maxSteps.getText());
+            p.setString("samplesPerShape", samplesPerShape.getText());
             p.setString("chromeBinary", chromeBinary.getText());
             p.setString("temperature", temperature.getText());
             p.setString("maxTokens", maxTokens.getText());
@@ -422,6 +434,7 @@ public class MapperTab {
             p.setString("hostFilter", hostFilter.getText());
             p.setString("groundTruth", groundTruth.getText());
             p.setBoolean("headless", headless.isSelected());
+            p.setBoolean("vision", vision.isSelected());
             p.setBoolean("blockDestructive", blockDestructive.isSelected());
             p.setBoolean("inScopeOnly", inScopeOnly.isSelected());
         } catch (RuntimeException ignored) {

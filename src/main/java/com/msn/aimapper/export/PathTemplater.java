@@ -15,6 +15,9 @@ public final class PathTemplater {
             "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
     private static final Pattern LONG_HEX = Pattern.compile("^[0-9a-fA-F]{16,}$");
     private static final Pattern HASHLIKE = Pattern.compile("^[A-Za-z0-9_-]{24,}$");
+    // ISO-8601 date segment, e.g. /archive/2026-01-31 -> /archive/{id}. Specific
+    // enough not to swallow slugs like "top-10-gadgets-2026".
+    private static final Pattern ISO_DATE = Pattern.compile("^\\d{4}-\\d{2}-\\d{2}$");
 
     private PathTemplater() {
     }
@@ -27,7 +30,8 @@ public final class PathTemplater {
         return NUMERIC.matcher(seg).matches()
                 || UUID.matcher(seg).matches()
                 || LONG_HEX.matcher(seg).matches()
-                || HASHLIKE.matcher(seg).matches();
+                || HASHLIKE.matcher(seg).matches()
+                || ISO_DATE.matcher(seg).matches();
     }
 
     /** Return the templated path, e.g. "/users/{id}/orders/{id2}". */

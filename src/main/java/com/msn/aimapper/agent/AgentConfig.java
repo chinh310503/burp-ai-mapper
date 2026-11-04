@@ -14,6 +14,12 @@ public class AgentConfig {
     public int maxSteps = 60;
     public boolean headless = false;
     public String chromeBinary = "";   // optional explicit path to chrome/chromium/edge
+    // How many URLs of the same shape (/products/{id}) to queue. Higher = more
+    // thorough on id-heavy sites, lower = faster / broader. Default 2.
+    public int samplesPerTemplate = 2;
+    // Vision fallback: when a page exposes NO interactive elements, attach a
+    // screenshot to the LLM call (needs a vision-capable model). Off by default.
+    public boolean vision = false;
 
     // Safety: hard, code-level block on destructive actions (delete / logout /
     // reset / pay / change security settings). On by default. This is enforced

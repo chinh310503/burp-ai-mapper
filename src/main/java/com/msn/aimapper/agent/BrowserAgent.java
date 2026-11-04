@@ -209,6 +209,8 @@ public class BrowserAgent {
     private volatile boolean stop;
     private volatile ChromeDriver driver;
     private volatile String targetHostField; // host of the current run, for coverage lookup
+    private volatile int samplesPerTemplate = SAMPLES_PER_TEMPLATE; // from cfg at run start
+    private volatile boolean visionNoted;     // log vision-fallback use only once
     /** The account the current pass must log in as (null = prompt-driven single pass). */
     private volatile Account activeAccount;
     /**
@@ -303,6 +305,8 @@ public class BrowserAgent {
 
             String targetHost = hostOf(cfg.targetUrl);
             targetHostField = targetHost;
+            samplesPerTemplate = cfg.samplesPerTemplate > 0
+                    ? cfg.samplesPerTemplate : SAMPLES_PER_TEMPLATE;
             Pattern extraBlock = compileExtra(cfg.extraBlockKeywords);
             if (cfg.blockDestructive) {
                 log.accept("[agent] SAFETY: destructive actions (delete/logout/reset/"
@@ -388,7 +392,7 @@ public class BrowserAgent {
                     }
                     String shape = PathTemplater.signature(n);
                     int seen = shapeSeen.getOrDefault(shape, 0);
-                    if (seen >= SAMPLES_PER_TEMPLATE) {
+                    if (seen >= samplesPerTemplate) {
                         continue; // already have enough examples of this endpoint shape
                     }
                     shapeSeen.put(shape, seen + 1);
@@ -402,7 +406,23 @@ public class BrowserAgent {
 
                 String reply;
                 try {
-                    reply = llm.chat(SYSTEM_PROMPT, state);
+                    if (cfg.vision && elems.isEmpty()) {
+                        // Vision fallback: no interactive elements to index -> let a
+                        // vision-capable model look at a screenshot instead.
+                        if (!visionNoted) {
+                            log.accept("[agent] Vision fallback: page has no interactive "
+                                    + "elements; attaching a screenshot for the model.");
+                            visionNoted = true;
+                        }
+                        String png = screenshotBase64();
+                        java.util.List<LlmClient.Msg> msgs = new java.util.ArrayList<>();
+                        msgs.add(LlmClient.Msg.system(SYSTEM_PROMPT));
+                        msgs.add(png != null ? LlmClient.Msg.userWithImage(state, png)
+                                : LlmClient.Msg.user(state));
+                        reply = llm.chat(msgs);
+                    } else {
+                        reply = llm.chat(SYSTEM_PROMPT, state);
+                    }
                 } catch (Exception e) {
                     log.accept("[agent] LLM error: " + e.getMessage() + " -- stopping.");
                     break;
@@ -534,6 +554,11 @@ public class BrowserAgent {
         options.addArguments("--disable-gpu", "--no-first-run", "--no-default-browser-check",
                 "--window-size=1400,900");
         return new ChromeDriver(options);
+    }
+
+    private String screenshotBase64() {
+        return safe(() -> ((org.openqa.selenium.TakesScreenshot) driver)
+                .getScreenshotAs(org.openqa.selenium.OutputType.BASE64), null);
     }
 
     private String extractElements() {
@@ -823,7 +848,7 @@ public class BrowserAgent {
             }
             String shape = PathTemplater.signature(n);
             int seen = shapeSeen.getOrDefault(shape, 0);
-            if (seen >= SAMPLES_PER_TEMPLATE) {
+            if (seen >= samplesPerTemplate) {
                 continue;
             }
             shapeSeen.put(shape, seen + 1);

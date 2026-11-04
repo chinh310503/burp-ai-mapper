@@ -20,18 +20,23 @@ import java.util.List;
  */
 public class LlmClient {
 
-    /** One chat message. */
-    public record Msg(String role, String content) {
+    /** One chat message. {@code imageB64} is an optional PNG (base64) for vision. */
+    public record Msg(String role, String content, String imageB64) {
         public static Msg system(String c) {
-            return new Msg("system", c);
+            return new Msg("system", c, null);
         }
 
         public static Msg user(String c) {
-            return new Msg("user", c);
+            return new Msg("user", c, null);
         }
 
         public static Msg assistant(String c) {
-            return new Msg("assistant", c);
+            return new Msg("assistant", c, null);
+        }
+
+        /** A user message with an attached screenshot (vision fallback). */
+        public static Msg userWithImage(String c, String imageB64) {
+            return new Msg("user", c, imageB64);
         }
     }
 
@@ -133,7 +138,23 @@ public class LlmClient {
         for (Msg m : messages) {
             JsonObject o = new JsonObject();
             o.addProperty("role", m.role());
-            o.addProperty("content", m.content());
+            if (m.imageB64() != null && !m.imageB64().isBlank()) {
+                // Multimodal content: text part + image part (OpenAI vision format).
+                JsonArray parts = new JsonArray();
+                JsonObject textPart = new JsonObject();
+                textPart.addProperty("type", "text");
+                textPart.addProperty("text", m.content());
+                parts.add(textPart);
+                JsonObject imgPart = new JsonObject();
+                imgPart.addProperty("type", "image_url");
+                JsonObject imgUrl = new JsonObject();
+                imgUrl.addProperty("url", "data:image/png;base64," + m.imageB64());
+                imgPart.add("image_url", imgUrl);
+                parts.add(imgPart);
+                o.add("content", parts);
+            } else {
+                o.addProperty("content", m.content());
+            }
             arr.add(o);
         }
         body.add("messages", arr);

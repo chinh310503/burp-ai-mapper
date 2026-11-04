@@ -154,10 +154,24 @@ body/response; không lộ secret; bảng điểm hiện coverage từng nhóm.
 
 ## P4 — Mở rộng (tùy chọn, sau khi lõi vững)
 
-16. **Vision fallback** (chụp màn hình khi DOM/a11y không đủ) — bật tùy chọn.
-17. **GraphQL**: introspection + nhận diện `/graphql` sâu hơn.
-18. **WebDriver BiDi**: thay dần CDP (Selenium coi CDP là tạm thời).
-19. **Điều chỉnh dedupe**: `SAMPLES_PER_TEMPLATE`, nhận diện thêm kiểu id (slug, base64).
+16. **Vision fallback** (chụp màn hình khi DOM/a11y không đủ) — bật tùy chọn. ✅ **đã làm**:
+    checkbox "Vision fallback"; khi trang **không có** element tương tác, đính kèm screenshot
+    (`TakesScreenshot` → base64) vào message đa phương thức (`Msg.userWithImage` + content
+    parts kiểu OpenAI vision). Mặc định tắt.
+19. **Điều chỉnh dedupe**: ✅ **đã làm**: `samplesPerTemplate` cấu hình được (UI "Samples per
+    URL shape", lưu trong prefs); thêm nhận diện id **ISO-8601 date** trong `PathTemplater`
+    (đủ đặc hiệu để không nuốt slug). *Không* thêm pattern id quá rộng vì rủi ro **over-template**
+    → gộp nhầm endpoint khác nhau, làm tụt coverage.
+17. ~~**GraphQL** introspection~~ — **DỜI**: Nexora không có GraphQL để kiểm chứng, và Burp
+    đã bắt đủ REST. Introspection cần request có session còn sống → xây lúc này là code đầu cơ
+    chưa test. Làm khi có target GraphQL thật (detect `/graphql` → POST introspection qua
+    browser fetch → ghi `graphql.json`).
+18. ~~**WebDriver BiDi**~~ — **DỜI**: ta đã **không** dùng CDP (coverage lấy từ Burp), nên không
+    có nợ CDP phải trả. BiDi chỉ cần cho chế độ "chạy không cần Burp" — giá trị thấp vì đây là
+    extension Burp. Làm sau nếu muốn capture độc lập proxy.
+
+**Trạng thái P4**: mục 16 + 19 đã triển khai trên branch `p0-safety-and-coverage-fixes`,
+build `shadowJar` PASS. Mục 17 + 18 dời (lý do ở trên).
 
 ---
 
