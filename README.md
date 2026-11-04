@@ -58,6 +58,12 @@ Kết quả trong Output dir:
 
 Mỗi bước: thu thập **link in-scope** của trang vào **frontier** (hàng đợi URL đã-phát-hiện-chưa-thăm, dedupe khi enqueue) → inject JS lấy danh sách phần tử tương tác (đánh index) → gửi URL + frontier + element list + prompt cho LLM → LLM trả **một JSON action** (`click`/`type`/`goto`/`back`/`wait`/`done`) → Selenium thực thi. Agent được dặn không logout/xóa/đổi setting/thanh toán.
 
+**Thu thập link đa cơ chế (không chỉ `<a href>`):** mỗi trang được quét lấy mọi URL điều hướng tiềm năng — `a[href]`, image map `<area>`, `form[action]`, `data-href/url/go`, `onclick/onchange` kiểu `location.href=…`, và `<select><option value="/…">` — kể cả link **ẩn** trong dropdown/tab/modal/`<details>` (quét bất kể hiển thị), **xuyên shadow DOM mở** và **iframe same-origin**. Trước khi quét còn chạy một bước "mở hết" thuần-DOM (open `<details>`, bung menu, bỏ `hidden`) và cuộn + bấm nút **"load more"** (chỉ nút có chữ load/show more — không bao giờ nút phá hoại) để lộ nội dung nạp bằng AJAX. Frontier còn được **seed sẵn** từ `sitemap.xml` + `robots.txt`.
+
+**Đa tài khoản:** nếu Task prompt liệt kê nhiều account (dạng `user / pass (role: …)`), agent crawl **mỗi tier một session riêng**, giữa các lượt **xoá cookie trong code rồi đăng nhập account kế** (re-auth do code quản lý — không phải "logout" bị chặn). Mọi lượt đều qua Burp nên site map tự gộp.
+
+**Route client-only:** hash route (`#/settings`) và SPA pushState được agent duyệt tới; vì proxy chỉ thấy `GET /app`, các URL client-only agent chạm được **gộp thêm** vào `sitemap.xml`/`urls.json` khi export (đánh dấu `"source":"crawler-client-route"`).
+
 **Khử trùng URL khi crawl (lấy mẫu theo "shape"):** mỗi URL được rút về một *shape* = path đã template-hóa + tên tham số query đã sort (bỏ giá trị), vd `/products/101` và `/products/125` → `/products/{id}`; `?category=books` và `?category=toys` → `?category`. Frontier chỉ nạp tối đa `SAMPLES_PER_TEMPLATE` (2) URL mỗi shape → agent không đi lại 25 trang product giống nhau mà dành bước cho **chức năng mới**, nhưng vẫn chạm **mọi endpoint khác nhau** (edit ≠ delete, method khác nhau là shape khác → không bỏ sót). Prompt cũng dặn model đừng tự liệt kê id tuần tự.
 
 **Điều kiện dừng (frontier-based, chống dừng sớm):**

@@ -75,6 +75,15 @@ thực thi (log `BLOCKED` cho delete/pay).
 image-map, data-*, select-jump, iframe inner, SPA `/app/docs/webhooks`, hash route,
 AJAX `/api/links`. Coverage GET page ≥ ~90%.
 
+**Trạng thái**: P1 đã triển khai trên branch `p0-safety-and-coverage-fixes`. Gồm:
+harvest đa cơ chế (`HARVEST_JS`: a/area/form/data-*/onclick/onchange/select + shadow DOM
++ iframe same-origin), pass "mở hết" (`REVEAL_JS`) + scroll + load-more (`exhaustPage`),
+`waitForReady` sau mọi điều hướng, seed từ `sitemap.xml`/`robots.txt` (`seedFromSiteFiles`),
+và gộp URL client-only vào export (`BrowserAgent.discoveredUrls()` →
+`SitemapGenerator.write(records, outDir, extraGetUrls)`). Build `shadowJar` PASS (fat JAR OK).
+Còn lại trong P1 (có thể làm sau khi chạy thử benchmark): tinh chỉnh ngưỡng chờ/`SAMPLES`
+theo kết quả `comm` thực tế.
+
 ---
 
 ## P2 — Bắt API trực tiếp + "bộ não" agent tin cậy (đạt *Excellent*)

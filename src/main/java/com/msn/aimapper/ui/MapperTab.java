@@ -198,9 +198,39 @@ public class MapperTab {
         runExport("sitemap", outDir -> {
             List<HttpRequestResponse> recs = SiteMapExtractor.collect(
                     api, hostFilter.getText().trim(), inScopeOnly.isSelected());
-            SitemapGenerator.write(recs, outDir);
-            log("[export] Wrote sitemap.xml and urls.json (" + recs.size() + " records) to " + outDir);
+            // Client-only routes the agent reached but the proxy never saw (hash / SPA
+            // pushState pages), filtered by the same host/scope rules as the records.
+            List<String> extra = filterClientUrls(agent.discoveredUrls());
+            SitemapGenerator.write(recs, outDir, extra);
+            log("[export] Wrote sitemap.xml and urls.json (" + recs.size() + " proxy records + "
+                    + extra.size() + " client-only URLs) to " + outDir);
         });
+    }
+
+    /** Apply the Host filter / In-scope only settings to the agent's client-only URLs. */
+    private List<String> filterClientUrls(java.util.Collection<String> urls) {
+        String needle = hostFilter.getText().trim().toLowerCase();
+        boolean scoped = inScopeOnly.isSelected();
+        List<String> out = new java.util.ArrayList<>();
+        for (String u : urls) {
+            if (u == null || u.isBlank()) {
+                continue;
+            }
+            if (!needle.isEmpty() && !u.toLowerCase().contains(needle)) {
+                continue;
+            }
+            if (scoped) {
+                try {
+                    if (!api.scope().isInScope(u)) {
+                        continue;
+                    }
+                } catch (RuntimeException ignored) {
+                    // malformed URL -> skip the scope test, keep it
+                }
+            }
+            out.add(u);
+        }
+        return out;
     }
 
     private void onExportApi() {

@@ -31,13 +31,28 @@ public final class SitemapGenerator {
     }
 
     public static void write(Iterable<HttpRequestResponse> records, Path outDir) throws IOException {
+        write(records, outDir, java.util.Collections.emptyList());
+    }
+
+    /**
+     * @param extraGetUrls additional in-scope GET page URLs the crawler reached that
+     *                     the proxy never saw as distinct requests - client-only
+     *                     routes such as {@code /app#/settings} (hash routing) and
+     *                     SPA pushState paths. Merged into sitemap.xml and urls.json.
+     */
+    public static void write(Iterable<HttpRequestResponse> records, Path outDir,
+                             java.util.Collection<String> extraGetUrls) throws IOException {
         Files.createDirectories(outDir);
-        writeXml(records, outDir.resolve("sitemap.xml"));
-        writeJson(records, outDir.resolve("urls.json"));
+        java.util.Collection<String> extra =
+                extraGetUrls == null ? java.util.Collections.emptyList() : extraGetUrls;
+        writeXml(records, extra, outDir.resolve("sitemap.xml"));
+        writeJson(records, extra, outDir.resolve("urls.json"));
         writeEndpoints(records, outDir.resolve("endpoints.json"));
     }
 
-    private static void writeXml(Iterable<HttpRequestResponse> records, Path file) throws IOException {
+    private static void writeXml(Iterable<HttpRequestResponse> records,
+                                 java.util.Collection<String> extraGetUrls,
+                                 Path file) throws IOException {
         // Group GET URLs by shape so /products/101..125 collapse to one entry.
         // Sorted maps/sets keep output stable and the representative deterministic.
         Map<String, TreeSet<String>> byShape = new TreeMap<>();
@@ -46,6 +61,12 @@ public final class SitemapGenerator {
             if (req != null && "GET".equalsIgnoreCase(req.method())) {
                 String shape = PathTemplater.signature(req.url());
                 byShape.computeIfAbsent(shape, k -> new TreeSet<>()).add(req.url());
+            }
+        }
+        // Client-only routes the proxy never recorded (hash / SPA pushState pages).
+        for (String u : extraGetUrls) {
+            if (u != null && !u.isBlank()) {
+                byShape.computeIfAbsent(PathTemplater.signature(u), k -> new TreeSet<>()).add(u);
             }
         }
         StringBuilder sb = new StringBuilder();
@@ -105,7 +126,9 @@ public final class SitemapGenerator {
         Files.write(file, json.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static void writeJson(Iterable<HttpRequestResponse> records, Path file) throws IOException {
+    private static void writeJson(Iterable<HttpRequestResponse> records,
+                                  java.util.Collection<String> extraGetUrls,
+                                  Path file) throws IOException {
         // De-duplicate by METHOD + URL, keeping the first response seen.
         Map<String, JsonObject> unique = new LinkedHashMap<>();
         for (HttpRequestResponse rr : records) {
@@ -123,6 +146,23 @@ public final class SitemapGenerator {
             HttpResponse resp = rr.response();
             o.addProperty("status", resp != null ? (int) resp.statusCode() : 0);
             o.addProperty("contentType", resp != null ? contentType(resp) : "");
+            unique.put(key, o);
+        }
+        // Client-only routes the proxy never recorded, flagged so they're distinguishable.
+        for (String u : extraGetUrls) {
+            if (u == null || u.isBlank()) {
+                continue;
+            }
+            String key = "GET " + u;
+            if (unique.containsKey(key)) {
+                continue;
+            }
+            JsonObject o = new JsonObject();
+            o.addProperty("method", "GET");
+            o.addProperty("url", u);
+            o.addProperty("status", 0);
+            o.addProperty("contentType", "");
+            o.addProperty("source", "crawler-client-route");
             unique.put(key, o);
         }
         JsonArray arr = new JsonArray();

@@ -102,9 +102,79 @@ public class BrowserAgent {
      */
     private static final int SAMPLES_PER_TEMPLATE = 2;
 
-    private static final String LINKS_JS =
-            "return JSON.stringify(Array.from(document.querySelectorAll('a[href]'))"
-            + ".map(a => a.href));";
+    /**
+     * Harvest EVERY potential navigation URL on the page, not just {@code <a href>}:
+     * anchors, image-map areas, form actions, {@code data-href/url/go} attributes,
+     * inline {@code onclick/onchange} location changes, and {@code <select><option>}
+     * values that look like URLs. Also descends into OPEN shadow roots and
+     * same-origin iframes, and resolves relative URLs against the right base. The
+     * hrefs are collected regardless of visibility, so links hidden inside closed
+     * dropdowns / tabs / modals / {@code <details>} are captured without clicking.
+     */
+    private static final String HARVEST_JS = """
+            const out = new Set();
+            function add(u, base) {
+              if (!u) return;
+              u = ('' + u).trim();
+              if (!u) return;
+              if (/^(javascript:|mailto:|tel:|data:|blob:|sms:)/i.test(u)) return;
+              try { out.add(new URL(u, base).href); } catch (e) {}
+            }
+            function harvest(root, base) {
+              root.querySelectorAll('a[href],area[href]').forEach(e => add(e.getAttribute('href'), base));
+              root.querySelectorAll('form[action]').forEach(e => add(e.getAttribute('action'), base));
+              root.querySelectorAll('[data-href],[data-url],[data-go]').forEach(e => {
+                add(e.getAttribute('data-href'), base);
+                add(e.getAttribute('data-url'), base);
+                add(e.getAttribute('data-go'), base);
+              });
+              root.querySelectorAll('option[value]').forEach(e => {
+                const v = e.getAttribute('value');
+                if (v && (v.charAt(0) === '/' || /^https?:/i.test(v))) add(v, base);
+              });
+              root.querySelectorAll('[onclick],[onchange]').forEach(e => {
+                const s = (e.getAttribute('onclick') || '') + ';' + (e.getAttribute('onchange') || '');
+                const re = /(?:location\\.(?:href|assign|replace)\\s*\\(?\\s*|(?:window\\.)?location\\s*=\\s*)['"]([^'"]+)['"]/g;
+                let m; while ((m = re.exec(s))) add(m[1], base);
+              });
+              root.querySelectorAll('*').forEach(e => { if (e.shadowRoot) harvest(e.shadowRoot, base); });
+            }
+            harvest(document, document.baseURI);
+            document.querySelectorAll('iframe,frame').forEach(f => {
+              try { const d = f.contentDocument; if (d) harvest(d, d.baseURI); } catch (e) {}
+            });
+            return JSON.stringify(Array.from(out));""";
+
+    /**
+     * Reveal hidden content so any lazily-shown links enter the DOM before we
+     * harvest: open every {@code <details>}, mark dropdowns/menus open, un-hide
+     * {@code [hidden]} panels/modals. Pure DOM mutation - it performs NO navigation
+     * and fires no handlers, so it can never trigger a destructive action.
+     */
+    private static final String REVEAL_JS = """
+            try {
+              document.querySelectorAll('details').forEach(d => { d.open = true; });
+              document.querySelectorAll('.dropdown,.menu,.has-dropdown,.mega').forEach(d => d.classList.add('open'));
+              document.querySelectorAll('[hidden]').forEach(e => { try { e.hidden = false; } catch (x) {} });
+              document.querySelectorAll('[aria-expanded="false"]').forEach(e => e.setAttribute('aria-expanded', 'true'));
+            } catch (e) {}
+            return true;""";
+
+    /** Async fetch of a URL's text (used to seed from sitemap.xml / robots.txt). */
+    private static final String FETCH_TEXT_JS =
+            "const cb = arguments[arguments.length - 1];"
+            + "fetch(arguments[0], {credentials:'include'}).then(r => r.text())"
+            + ".then(t => cb(t)).catch(() => cb(''));";
+
+    /**
+     * Visible text on a control that means "load the next batch" (safe to click).
+     * Deliberately specific: requires a load/show/view/see + more/older wording (or
+     * the Vietnamese equivalents), NOT a bare "more", so a blog "Read more" link that
+     * would navigate away is not treated as a load-more button.
+     */
+    private static final Pattern LOAD_MORE_TEXT = Pattern.compile(
+            "(?i)(load|show|view|see|fetch)\\s+(more|older|additional|next)"
+            + "|load\\s*more|show\\s*more|t\\u1ea3i th\\u00eam|xem th\\u00eam");
 
     /**
      * HARD-destructive tokens in a URL path/query: a plain GET to these typically
@@ -139,6 +209,20 @@ public class BrowserAgent {
     private volatile ChromeDriver driver;
     /** The account the current pass must log in as (null = prompt-driven single pass). */
     private volatile Account activeAccount;
+    /**
+     * Every in-scope URL the agent actually landed on, including client-only routes
+     * ({@code #/...} hash routes and SPA pushState paths) that the proxy never sees
+     * as distinct requests. The export merges these so such pages aren't lost.
+     */
+    private final Set<String> discovered =
+            java.util.Collections.synchronizedSet(new LinkedHashSet<>());
+
+    /** Snapshot of the in-scope URLs the agent reached (for the export to merge in). */
+    public Set<String> discoveredUrls() {
+        synchronized (discovered) {
+            return new LinkedHashSet<>(discovered);
+        }
+    }
 
     /** One parsed login from the TASK prompt. */
     record Account(String username, String password, String label) {
@@ -208,6 +292,7 @@ public class BrowserAgent {
                     + " (insecure certs accepted so Burp's CA works).");
             driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(30));
             driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(2));
+            driver.manage().timeouts().scriptTimeout(Duration.ofSeconds(15)); // for async fetch seeds
 
             String targetHost = hostOf(cfg.targetUrl);
             Pattern extraBlock = compileExtra(cfg.extraBlockKeywords);
@@ -262,11 +347,18 @@ public class BrowserAgent {
             int noProgress = 0;                                     // steps without anything new
             int blocked = 0;                                        // destructive actions blocked
 
+            seedFromSiteFiles(cfg, targetHost, frontier, shapeSeen, extraBlock);
+
             for (int step = 1; step <= cfg.maxSteps && !stop; step++) {
                 String url = normalizeUrl(safe(() -> driver.getCurrentUrl(), cfg.targetUrl));
                 String title = safe(() -> driver.getTitle(), "");
                 boolean newUrl = visited.add(url);
                 frontier.remove(url);
+                if (newUrl) {
+                    discovered.add(url);
+                    waitForReady(400);   // let async (AJAX) content load before harvesting
+                    exhaustPage();       // scroll + click "load more" to surface appended links
+                }
 
                 // Discover in-scope links on this page; enqueue unvisited ones, but
                 // only a few per URL shape so near-identical URLs (/user/1, /user/2, ...)
@@ -513,6 +605,7 @@ public class BrowserAgent {
                     if (e != null) {
                         scrollTo(e);
                         e.click();
+                        waitForReady(0);
                     }
                 }
                 case "type" -> {
@@ -533,9 +626,13 @@ public class BrowserAgent {
                     String u = getStr(action, "url", "");
                     if (!u.isBlank()) {
                         driver.get(u);
+                        waitForReady(0);
                     }
                 }
-                case "back" -> driver.navigate().back();
+                case "back" -> {
+                    driver.navigate().back();
+                    waitForReady(0);
+                }
                 case "wait" -> sleep(1200);
                 default -> log.accept("[agent] Unknown action: " + type);
             }
@@ -568,11 +665,13 @@ public class BrowserAgent {
 
     // --- helpers ---
 
-    /** All anchor hrefs on the current page, resolved to absolute URLs. */
+    /** Every navigation URL on the page (all mechanisms), resolved to absolute URLs. */
     private java.util.List<String> extractLinks() {
         java.util.List<String> out = new java.util.ArrayList<>();
         try {
-            Object r = ((JavascriptExecutor) driver).executeScript(LINKS_JS);
+            // Reveal hidden content first (pure DOM, no navigation), then harvest.
+            safe(() -> ((JavascriptExecutor) driver).executeScript(REVEAL_JS), null);
+            Object r = ((JavascriptExecutor) driver).executeScript(HARVEST_JS);
             if (r != null) {
                 JsonArray arr = JsonParser.parseString(r.toString()).getAsJsonArray();
                 for (int i = 0; i < arr.size(); i++) {
@@ -584,9 +683,168 @@ public class BrowserAgent {
         return out;
     }
 
+    /** Wait until the document finished loading (bounded), then optionally settle. */
+    private void waitForReady(long settleMs) {
+        long end = System.currentTimeMillis() + 5000;
+        while (System.currentTimeMillis() < end && !stop) {
+            Object st = safe(() -> ((JavascriptExecutor) driver)
+                    .executeScript("return document.readyState"), "complete");
+            if ("complete".equals(String.valueOf(st))) {
+                break;
+            }
+            sleep(150);
+        }
+        if (settleMs > 0) {
+            sleep(settleMs);
+        }
+    }
+
+    /**
+     * Deterministic coverage pass for a freshly reached page: scroll to the bottom
+     * (trigger lazy content) and click "load more"-style buttons a bounded number of
+     * times so AJAX-appended links appear. Only clicks controls whose visible text
+     * clearly means "load the next batch" - never a destructive control.
+     */
+    private void exhaustPage() {
+        safe(() -> ((JavascriptExecutor) driver)
+                .executeScript("window.scrollTo(0, document.body.scrollHeight); return null;"), null);
+        waitForReady(300);
+        for (int i = 0; i < 8 && !stop; i++) {
+            WebElement btn = findLoadMore();
+            if (btn == null) {
+                break;
+            }
+            try {
+                scrollTo(btn);
+                btn.click();
+            } catch (RuntimeException e) {
+                break;
+            }
+            waitForReady(400);
+        }
+    }
+
+    private WebElement findLoadMore() {
+        try {
+            // Buttons only - anchors are navigation and are already harvested as links,
+            // so we never click an <a> here (avoids wandering off during the pass).
+            for (WebElement e : driver.findElements(
+                    By.cssSelector("button,[role=button],input[type=button]"))) {
+                if (!safe(e::isDisplayed, false) || !safe(e::isEnabled, false)) {
+                    continue;
+                }
+                String t = safe(e::getText, "");
+                if (t == null || t.isBlank()) {
+                    continue;
+                }
+                String low = t.trim();
+                if (LOAD_MORE_TEXT.matcher(low).find()
+                        && !DESTRUCTIVE_TEXT.matcher(low).find()) {
+                    return e;
+                }
+            }
+        } catch (RuntimeException ignored) {
+        }
+        return null;
+    }
+
+    /**
+     * Seed the frontier from the site's own {@code /sitemap.xml} and {@code /robots.txt}
+     * (both fetched through the browser, so they also land in Burp). We still crawl
+     * links for real, so "unlisted" pages omitted from sitemap.xml are not missed -
+     * this only guarantees the listed baseline and the robots-mentioned paths.
+     */
+    private void seedFromSiteFiles(AgentConfig cfg, String targetHost,
+                                   LinkedHashSet<String> frontier,
+                                   Map<String, Integer> shapeSeen, Pattern extraBlock) {
+        String origin = originOf(cfg.targetUrl);
+        if (origin == null) {
+            return;
+        }
+        java.util.LinkedHashSet<String> candidates = new java.util.LinkedHashSet<>();
+        // robots.txt: collect any Sitemap: URL and Allow/Disallow path tokens.
+        String robots = fetchText(origin + "/robots.txt");
+        java.util.List<String> sitemapUrls = new java.util.ArrayList<>();
+        sitemapUrls.add(origin + "/sitemap.xml");
+        if (robots != null) {
+            for (String line : robots.split("\\r?\\n")) {
+                String l = line.trim();
+                int c = l.indexOf(':');
+                if (c < 0) {
+                    continue;
+                }
+                String key = l.substring(0, c).trim().toLowerCase();
+                String val = l.substring(c + 1).trim();
+                if (key.equals("sitemap") && !val.isBlank()) {
+                    sitemapUrls.add(val);
+                } else if ((key.equals("allow") || key.equals("disallow"))
+                        && val.startsWith("/") && !val.contains("*")) {
+                    candidates.add(origin + val);
+                }
+            }
+        }
+        // sitemap.xml: pull <loc> entries.
+        for (String sm : sitemapUrls) {
+            String xml = fetchText(sm);
+            if (xml == null) {
+                continue;
+            }
+            java.util.regex.Matcher m = Pattern.compile("(?i)<loc>\\s*(.*?)\\s*</loc>").matcher(xml);
+            while (m.find()) {
+                candidates.add(m.group(1).trim());
+            }
+        }
+        int added = 0;
+        for (String u : candidates) {
+            String n = normalizeUrl(u);
+            if (!inScope(n, targetHost) || frontier.contains(n)) {
+                continue;
+            }
+            if (cfg.blockDestructive && isDestructiveUrl(n, extraBlock)) {
+                continue;
+            }
+            String shape = PathTemplater.signature(n);
+            int seen = shapeSeen.getOrDefault(shape, 0);
+            if (seen >= SAMPLES_PER_TEMPLATE) {
+                continue;
+            }
+            shapeSeen.put(shape, seen + 1);
+            frontier.add(n);
+            added++;
+        }
+        if (added > 0) {
+            log.accept("[agent] Seeded " + added + " URL(s) from sitemap.xml / robots.txt.");
+        }
+    }
+
+    private String fetchText(String url) {
+        try {
+            Object r = ((JavascriptExecutor) driver).executeAsyncScript(FETCH_TEXT_JS, url);
+            String s = r == null ? "" : r.toString();
+            return s.isBlank() ? null : s;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** scheme://host[:port] of a URL, or null. */
+    private static String originOf(String u) {
+        try {
+            URI uri = new URI(u);
+            if (uri.getScheme() == null || uri.getHost() == null) {
+                return null;
+            }
+            String o = uri.getScheme() + "://" + uri.getHost();
+            return uri.getPort() > 0 ? o + ":" + uri.getPort() : o;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private void gotoUrl(String u) {
         try {
             driver.get(u);
+            waitForReady(0);
         } catch (RuntimeException e) {
             log.accept("[agent] goto failed (" + trunc(u, 60) + "): " + shortMsg(e));
         }
