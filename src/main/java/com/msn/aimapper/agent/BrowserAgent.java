@@ -48,6 +48,16 @@ public class BrowserAgent {
             delete/logout/reset/pay action you pick will be blocked and skipped, so do \
             not waste steps on them - map those endpoints by reading the page, not by \
             triggering them.
+            LOGIN: to sign in you MUST fill EVERY field of the login form before \
+            submitting. Do it in this order, one action per step: first "type" the \
+            username/email into its field, then "type" the password into the password \
+            field (type=password), and ONLY THEN "click" the submit button. NEVER click \
+            submit while the password field is still empty. After a failed attempt the \
+            form reloads EMPTY, so re-type BOTH the username and the password again \
+            before submitting. Use the exact credentials from the ACTIVE ACCOUNT / TASK. \
+            The ELEMENTS list marks each field "(empty)" or "(filled)" and the state \
+            shows a LOGIN FORM hint with the exact field indices - follow it. \
+            For a one-shot submit you may use "enter":true on the password "type" action. \
             COVERAGE: the state shows UNVISITED LINKS REMAINING and a sample of them. \
             Your job is to drive that number to 0. Prefer clicking links / using "goto" \
             to reach unvisited URLs, and open menus/forms that may reveal more links. Do \
@@ -81,7 +91,11 @@ public class BrowserAgent {
               let text = (el.innerText || el.value || el.getAttribute('aria-label')
                 || el.getAttribute('placeholder') || el.getAttribute('name') || '').trim();
               if (text.length > 80) text = text.slice(0, 80);
-              out.push({i: i, tag: tag, type: type, text: text,
+              // Whether a form control currently holds a value (so the model can tell a
+              // filled field from an empty one - placeholder text alone is NOT "filled").
+              const isField = (tag === 'input' || tag === 'textarea' || tag === 'select');
+              const filled = isField && el.value != null && String(el.value).length > 0;
+              out.push({i: i, tag: tag, type: type, text: text, field: isField, filled: filled,
                         name: el.getAttribute('name') || '', href: el.getAttribute('href') || ''});
               i++;
               if (i > 120) break;
@@ -475,7 +489,9 @@ public class BrowserAgent {
                     String next = pollFirst(frontier);
                     log.accept("[agent] Model said done but ~" + (frontier.size() + 1)
                             + " links remain -> continuing to " + trunc(next, 80));
-                    gotoUrl(next);
+                    if (gotoUrl(next)) {
+                        visited.add(normalizeUrl(next)); // requested url (redirects won't re-queue it)
+                    }
                     noProgress = 0;
                     sleep(700);
                     continue;
@@ -512,7 +528,9 @@ public class BrowserAgent {
                     String next = pollFirst(frontier);
                     log.accept("[agent] Stuck " + noProgress + " steps -> jumping to unvisited: "
                             + trunc(next, 80));
-                    gotoUrl(next);
+                    if (gotoUrl(next)) {
+                        visited.add(normalizeUrl(next)); // requested url (redirects won't re-queue it)
+                    }
                     noProgress = 0;
                     sleep(700);
                     continue;
@@ -533,7 +551,19 @@ public class BrowserAgent {
                         while (recent.size() > 8) {
                             recent.removeFirst();
                         }
-                        execute(action, type);
+                        boolean ok = execute(action, type);
+                        // Mark the REQUESTED goto url visited (only if navigation
+                        // succeeded) even if it redirects elsewhere, so a redirecting
+                        // link (e.g. /login?next=... that bounces to /dashboard once
+                        // logged in) isn't retried forever - while a transient failure
+                        // leaves it in play for a later retry.
+                        if (ok && "goto".equals(type)) {
+                            String gu = normalizeUrl(getStr(act, "url", ""));
+                            if (!gu.isBlank()) {
+                                visited.add(gu);
+                                frontier.remove(gu);
+                            }
+                        }
                     }
                 }
                 sleep(900);
@@ -634,6 +664,10 @@ public class BrowserAgent {
                             + "explore everything this account can reach. Ignore the other accounts "
                             + "listed in the TASK during this pass.\n\n");
         }
+        String login = loginHint(parseElems(elementsJson));
+        if (login != null) {
+            sb.append(login).append("\n\n");
+        }
         String capDisp = cfg.maxSteps <= 0 ? "∞" : Integer.toString(cfg.maxSteps);
         sb.append("STEP ").append(step).append(" / ").append(capDisp).append('\n');
         sb.append("CURRENT URL: ").append(url).append('\n');
@@ -661,6 +695,87 @@ public class BrowserAgent {
         return sb.toString();
     }
 
+    /**
+     * If the page has a login form (a password field), build a hint telling the model
+     * exactly which indices are the username, password and submit controls and whether
+     * each field is already filled - so it fills BOTH before submitting instead of
+     * clicking submit on an empty password and looping. Returns null when no login form.
+     */
+    private static String loginHint(java.util.List<JsonObject> elems) {
+        int pwIdx = -1;
+        int userIdx = -1;
+        int submitIdx = -1;
+        boolean pwFilled = false;
+        boolean userFilled = false;
+        for (JsonObject e : elems) {
+            if ("input".equals(getStr(e, "tag", ""))
+                    && "password".equalsIgnoreCase(getStr(e, "type", ""))) {
+                pwIdx = intOf(e);
+                pwFilled = getBool(e, "filled");
+                break;
+            }
+        }
+        if (pwIdx < 0) {
+            return null;
+        }
+        for (JsonObject e : elems) {
+            int i = intOf(e);
+            if (i == pwIdx) {
+                continue;
+            }
+            String tag = getStr(e, "tag", "");
+            String type = getStr(e, "type", "").toLowerCase();
+            String name = getStr(e, "name", "").toLowerCase();
+            if ("input".equals(tag) && (type.equals("text") || type.equals("email") || type.isEmpty()
+                    || name.contains("user") || name.contains("email") || name.contains("login"))) {
+                userIdx = i;
+                userFilled = getBool(e, "filled");
+                break;
+            }
+        }
+        for (JsonObject e : elems) {
+            String tag = getStr(e, "tag", "");
+            String type = getStr(e, "type", "").toLowerCase();
+            String txt = getStr(e, "text", "").toLowerCase();
+            if (("button".equals(tag) || ("input".equals(tag)
+                    && (type.equals("submit") || type.equals("button"))))
+                    && (txt.contains("sign") || txt.contains("log")
+                        || txt.contains("submit") || txt.contains("continue"))) {
+                submitIdx = intOf(e);
+                break;
+            }
+        }
+        StringBuilder sb = new StringBuilder("LOGIN FORM DETECTED - sign in before exploring. ");
+        if (userIdx >= 0) {
+            sb.append("Username field = index ").append(userIdx)
+                    .append(userFilled ? " (filled)" : " (EMPTY - type the username here)").append(". ");
+        }
+        sb.append("Password field = index ").append(pwIdx)
+                .append(pwFilled ? " (filled)" : " (EMPTY - type the password here)").append(". ");
+        if (submitIdx >= 0) {
+            sb.append("Submit = index ").append(submitIdx).append(". ");
+        }
+        sb.append("Fill BOTH fields with the ACTIVE ACCOUNT credentials, THEN submit; "
+                + "do NOT submit while the password is EMPTY.");
+        return sb.toString();
+    }
+
+    private static int intOf(JsonObject e) {
+        try {
+            return e.get("i").getAsInt();
+        } catch (RuntimeException ex) {
+            return -1;
+        }
+    }
+
+    private static boolean getBool(JsonObject o, String key) {
+        try {
+            return o.has(key) && o.get(key).getAsBoolean();
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     private String formatElements(String elementsJson) {
         try {
             JsonArray arr = JsonParser.parseString(elementsJson).getAsJsonArray();
@@ -670,6 +785,9 @@ public class BrowserAgent {
                 sb.append(getStr(o, "i", "?")).append(": ")
                         .append(getStr(o, "tag", "")).append('/').append(getStr(o, "type", ""))
                         .append(" - ").append(trunc(getStr(o, "text", ""), 80));
+                if (getBool(o, "field")) {
+                    sb.append(getBool(o, "filled") ? " (filled)" : " (empty)");
+                }
                 String name = getStr(o, "name", "");
                 if (!name.isBlank()) {
                     sb.append(" [").append(name).append(']');
@@ -686,7 +804,7 @@ public class BrowserAgent {
         }
     }
 
-    private void execute(JsonObject action, String type) {
+    private boolean execute(JsonObject action, String type) {
         try {
             switch (type) {
                 case "click" -> {
@@ -725,8 +843,10 @@ public class BrowserAgent {
                 case "wait" -> sleep(1200);
                 default -> log.accept("[agent] Unknown action: " + type);
             }
+            return true;
         } catch (RuntimeException e) {
             log.accept("[agent] action '" + type + "' failed: " + shortMsg(e));
+            return false;
         }
     }
 
@@ -770,6 +890,7 @@ public class BrowserAgent {
         } catch (RuntimeException ignored) {
         }
     }
+
 
     // --- helpers ---
 
@@ -949,12 +1070,20 @@ public class BrowserAgent {
         }
     }
 
-    private void gotoUrl(String u) {
+    /**
+     * Navigate to a URL. Returns true if navigation did not throw (a 3xx redirect or
+     * a 4xx/5xx page still counts as success - the request was made and captured);
+     * false only on a real driver error (timeout, unreachable). Callers mark a URL
+     * "visited" only on success, so a transient failure can still be retried later.
+     */
+    private boolean gotoUrl(String u) {
         try {
             driver.get(u);
             waitForReady(0);
+            return true;
         } catch (RuntimeException e) {
             log.accept("[agent] goto failed (" + trunc(u, 60) + "): " + shortMsg(e));
+            return false;
         }
     }
 
