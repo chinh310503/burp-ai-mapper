@@ -57,7 +57,7 @@ public class MapperTab {
     // Browser / proxy
     private final JTextField proxyHost = new JTextField("127.0.0.1");
     private final JTextField proxyPort = new JTextField("8080");
-    private final JTextField maxSteps = new JTextField("60");
+    private final JTextField maxSteps = new JTextField("0");
     private final JTextField samplesPerShape = new JTextField("2");
     private final JTextField chromeBinary = new JTextField();
     private final JCheckBox headless = new JCheckBox("Headless browser");
@@ -73,6 +73,11 @@ public class MapperTab {
     private final JTextField hostFilter = new JTextField();
     private final JCheckBox inScopeOnly = new JCheckBox("In-scope only", true);
     private final JTextField groundTruth = new JTextField();
+    private final JTextField logFile = new JTextField();
+
+    // Where agent/log lines are also written (resolved at Start). null = file off.
+    private volatile java.nio.file.Path logFilePath;
+    private final Object logLock = new Object();
 
     private final JTextArea logArea = new JTextArea();
     private final JPanel root = new JPanel(new BorderLayout());
@@ -121,7 +126,7 @@ public class MapperTab {
         form.add(section("3. Browser & Burp proxy"));
         form.add(row("Proxy host", proxyHost));
         form.add(row("Proxy port", proxyPort));
-        form.add(row("Max steps", maxSteps));
+        form.add(row("Max steps (0 = crawl until complete)", maxSteps));
         form.add(row("Samples per URL shape", samplesPerShape));
         form.add(row("Chrome binary (optional)", chromeBinary));
         JPanel cb = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
@@ -142,18 +147,21 @@ public class MapperTab {
         scope.add(inScopeOnly);
         form.add(scope);
         form.add(row("Ground-truth URLs file (optional, for scoring)", groundTruth));
+        form.add(row("Log file (optional; blank = <output dir>/ai-mapper.log)", logFile));
 
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT));
         JButton start = new JButton("Start AI browsing");
         JButton stop = new JButton("Stop");
         JButton exSitemap = new JButton("Export sitemap");
         JButton exApi = new JButton("Export OpenAPI");
+        JButton exLog = new JButton("Export log");
         JButton score = new JButton("Score vs ground-truth");
         JButton clear = new JButton("Clear log");
         buttons.add(start);
         buttons.add(stop);
         buttons.add(exSitemap);
         buttons.add(exApi);
+        buttons.add(exLog);
         buttons.add(score);
         buttons.add(clear);
         form.add(Box.createVerticalStrut(8));
@@ -163,6 +171,7 @@ public class MapperTab {
         stop.addActionListener(e -> agent.stop());
         exSitemap.addActionListener(e -> onExportSitemap());
         exApi.addActionListener(e -> onExportApi());
+        exLog.addActionListener(e -> onExportLog());
         score.addActionListener(e -> onScore());
         clear.addActionListener(e -> logArea.setText(""));
 
@@ -209,6 +218,7 @@ public class MapperTab {
             return;
         }
         savePrefs();
+        resolveLogFile();
         LlmClient llm = new LlmClient(cfg.baseUrl, cfg.apiKey, cfg.model,
                 cfg.temperature, cfg.maxTokens, cfg.jsonMode, cfg.llmRetries);
         log("[ui] Starting. Chrome will route through Burp at " + cfg.proxyEndpoint()
@@ -262,6 +272,17 @@ public class MapperTab {
             String title = hostFilter.getText().isBlank() ? "Discovered API" : hostFilter.getText().trim();
             OpenApiGenerator.write(recs, outDir, title);
             log("[export] Wrote openapi.json (from " + recs.size() + " records) to " + outDir);
+        });
+    }
+
+    /** Write the current log pane contents to a file in the Output dir, on demand. */
+    private void onExportLog() {
+        final String content = logArea.getText();  // read on the EDT (button thread)
+        runExport("log", outDir -> {
+            java.nio.file.Files.createDirectories(outDir);
+            Path f = outDir.resolve("ai-mapper-log.txt");
+            java.nio.file.Files.writeString(f, content);
+            log("[export] Wrote log (" + content.length() + " chars) to " + f);
         });
     }
 
@@ -394,6 +415,7 @@ public class MapperTab {
             setIf(p.getString("outputDir"), outputDir);
             setIf(p.getString("hostFilter"), hostFilter);
             setIf(p.getString("groundTruth"), groundTruth);
+            setIf(p.getString("logFile"), logFile);
             Boolean h = p.getBoolean("headless");
             if (h != null) {
                 headless.setSelected(h);
@@ -433,6 +455,7 @@ public class MapperTab {
             p.setString("outputDir", outputDir.getText());
             p.setString("hostFilter", hostFilter.getText());
             p.setString("groundTruth", groundTruth.getText());
+            p.setString("logFile", logFile.getText());
             p.setBoolean("headless", headless.isSelected());
             p.setBoolean("vision", vision.isSelected());
             p.setBoolean("blockDestructive", blockDestructive.isSelected());
@@ -494,10 +517,62 @@ public class MapperTab {
     private void log(String msg) {
         String line = "[" + LocalTime.now().withNano(0) + "] " + msg + "\n";
         api.logging().logToOutput(msg);
+        appendLog(line);
         SwingUtilities.invokeLater(() -> {
             logArea.append(line);
             logArea.setCaretPosition(logArea.getDocument().getLength());
         });
+    }
+
+    /** Append a line to the configured log file (if any). Best-effort, thread-safe. */
+    private void appendLog(String line) {
+        java.nio.file.Path p = logFilePath;
+        if (p == null) {
+            return;
+        }
+        synchronized (logLock) {
+            try {
+                java.nio.file.Files.writeString(p, line,
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.APPEND);
+            } catch (Exception ignored) {
+                // never let logging break the run
+            }
+        }
+    }
+
+    /**
+     * Decide where to write the run log (called at Start). If the Log file field is
+     * blank, default to {@code <output dir>/ai-mapper.log} when an output dir is set;
+     * otherwise file logging stays off. Writes a session header on open.
+     */
+    private void resolveLogFile() {
+        String lf = logFile.getText().trim();
+        if (!lf.isEmpty()) {
+            logFilePath = Path.of(lf);
+        } else {
+            String out = outputDir.getText().trim();
+            logFilePath = out.isEmpty() ? null : Path.of(out, "ai-mapper.log");
+        }
+        if (logFilePath == null) {
+            return;
+        }
+        try {
+            if (logFilePath.getParent() != null) {
+                java.nio.file.Files.createDirectories(logFilePath.getParent());
+            }
+            String header = "\n=== AI Mapper session " + java.time.LocalDateTime.now().withNano(0)
+                    + " | target=" + targetUrl.getText().trim()
+                    + " | model=" + currentModel()
+                    + " | maxSteps=" + maxSteps.getText().trim()
+                    + " | samples=" + samplesPerShape.getText().trim() + " ===\n";
+            java.nio.file.Files.writeString(logFilePath, header,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            log("[ui] Logging this run to " + logFilePath);
+        } catch (Exception e) {
+            logFilePath = null;
+            log("[ui] Could not open log file: " + e.getMessage() + " (file logging off).");
+        }
     }
 
     /**

@@ -88,6 +88,9 @@ public class BrowserAgent {
             }
             return JSON.stringify(out);""";
 
+    /** Absolute ceiling when Max steps = 0 (crawl-until-complete), to avoid a true
+     *  infinite loop on a pathological site. High enough to mean "map everything". */
+    private static final int ABSOLUTE_MAX_STEPS = 100_000;
     /** When stuck this many steps AND links still remain, jump to an unvisited URL. */
     private static final int STUCK_LIMIT = 4;
     /** Stop only when the frontier is empty AND no progress for this many steps. */
@@ -155,7 +158,19 @@ public class BrowserAgent {
             try {
               document.querySelectorAll('details').forEach(d => { d.open = true; });
               document.querySelectorAll('.dropdown,.menu,.has-dropdown,.mega').forEach(d => d.classList.add('open'));
-              document.querySelectorAll('[hidden]').forEach(e => { try { e.hidden = false; } catch (x) {} });
+              // Un-hide hidden content so lazily-shown links enter the DOM, BUT skip
+              // modal/overlay/backdrop/dialog elements: forcing those visible drops a
+              // full-page overlay that then intercepts real clicks. Links inside a
+              // hidden modal are still harvested (querySelectorAll finds them anyway).
+              document.querySelectorAll('[hidden]').forEach(e => {
+                try {
+                  var cls = (e.className && e.className.toString) ? e.className.toString() : '';
+                  var overlay = /modal|overlay|backdrop|dialog|popup|lightbox|drawer/i.test(cls)
+                    || e.getAttribute('role') === 'dialog'
+                    || e.getAttribute('aria-modal') === 'true';
+                  if (!overlay) e.hidden = false;
+                } catch (x) {}
+              });
               document.querySelectorAll('[aria-expanded="false"]').forEach(e => e.setAttribute('aria-expanded', 'true'));
             } catch (e) {}
             return true;""";
@@ -318,6 +333,22 @@ public class BrowserAgent {
                         + "throwaway test environment.");
             }
 
+            // Step budget. Max steps = 0 means "crawl until complete": keep going until
+            // the frontier is drained (no unvisited links left) or the user clicks Stop,
+            // with only a high absolute ceiling as an infinite-loop guard. A positive
+            // value is a hard cap per pass.
+            boolean unlimited = cfg.maxSteps <= 0;
+            int stepCap = unlimited ? ABSOLUTE_MAX_STEPS : cfg.maxSteps;
+            String capDisp = unlimited ? "∞" : Integer.toString(cfg.maxSteps);
+            if (unlimited) {
+                log.accept("[agent] Max steps = 0 -> crawling UNTIL COMPLETE: stops only when "
+                        + "no unvisited links remain (or you click Stop). Safety ceiling "
+                        + ABSOLUTE_MAX_STEPS + " steps.");
+            } else {
+                log.accept("[agent] Step cap " + cfg.maxSteps + " per pass. Set Max steps = 0 "
+                        + "to crawl the whole sitemap until no links remain.");
+            }
+
             // Multi-account: if the TASK lists several accounts, crawl each in its
             // OWN session (one privilege tier per pass). Between passes we clear the
             // cookies in CODE and log back in as the next account -- this is a
@@ -330,7 +361,7 @@ public class BrowserAgent {
                 passes = java.util.Collections.singletonList(null); // single prompt-driven pass
             } else if (passes.size() > 1) {
                 log.accept("[agent] " + passes.size() + " accounts detected -> crawling each "
-                        + "privilege tier in its own session (up to " + cfg.maxSteps + " steps each).");
+                        + "privilege tier in its own session (up to " + capDisp + " steps each).");
             }
 
             int totalVisited = 0;
@@ -358,10 +389,11 @@ public class BrowserAgent {
             Deque<String> recent = new ArrayDeque<>();
             int noProgress = 0;                                     // steps without anything new
             int blocked = 0;                                        // destructive actions blocked
+            boolean completed = false;                              // true if the pass finished naturally
 
             seedFromSiteFiles(cfg, targetHost, frontier, shapeSeen, extraBlock);
 
-            for (int step = 1; step <= cfg.maxSteps && !stop; step++) {
+            for (int step = 1; step <= stepCap && !stop; step++) {
                 String url = normalizeUrl(safe(() -> driver.getCurrentUrl(), cfg.targetUrl));
                 String title = safe(() -> driver.getTitle(), "");
                 boolean newUrl = visited.add(url);
@@ -437,6 +469,7 @@ public class BrowserAgent {
                     if (frontier.isEmpty()) {
                         log.accept("[agent] Done confirmed at step " + step
                                 + " (no unvisited links remain).");
+                        completed = true;
                         break;
                     }
                     String next = pollFirst(frontier);
@@ -460,7 +493,8 @@ public class BrowserAgent {
                 boolean progress = newUrl || (meaningful && newAction);
                 noProgress = progress ? 0 : noProgress + 1;
 
-                log.accept("[agent] step " + step + "/" + cfg.maxSteps + ": " + type
+                log.accept("[agent] step " + step + "/" + capDisp + " @ " + trunc(url, 70)
+                        + ": " + type + targetDesc(type, act, elems)
                         + (newUrl || newAction ? "" : " (repeat)")
                         + "  [queue=" + frontier.size() + "]"
                         + (reason.isBlank() ? "" : " - " + reason));
@@ -469,6 +503,7 @@ public class BrowserAgent {
                 if (frontier.isEmpty() && noProgress >= DONE_STABLE) {
                     log.accept("[agent] Frontier empty and no new activity for " + DONE_STABLE
                             + " steps -> crawl complete.");
+                    completed = true;
                     break;
                 }
 
@@ -502,6 +537,16 @@ public class BrowserAgent {
                     }
                 }
                 sleep(900);
+            }
+            if (!completed && !stop) {
+                if (unlimited) {
+                    log.accept("[agent] Hit the safety ceiling " + ABSOLUTE_MAX_STEPS + " with "
+                            + frontier.size() + " link(s) still queued (unusually large site).");
+                } else {
+                    log.accept("[agent] Reached Max steps " + cfg.maxSteps + " with "
+                            + frontier.size() + " link(s) still queued -> raise Max steps, or set "
+                            + "it to 0 to crawl until the whole sitemap is covered.");
+                }
             }
             log.accept("[agent] Pass " + (pass + 1) + "/" + passes.size()
                     + (acct != null ? " [" + acct.display() + "]" : "")
@@ -589,7 +634,8 @@ public class BrowserAgent {
                             + "explore everything this account can reach. Ignore the other accounts "
                             + "listed in the TASK during this pass.\n\n");
         }
-        sb.append("STEP ").append(step).append(" / ").append(cfg.maxSteps).append('\n');
+        String capDisp = cfg.maxSteps <= 0 ? "∞" : Integer.toString(cfg.maxSteps);
+        sb.append("STEP ").append(step).append(" / ").append(capDisp).append('\n');
         sb.append("CURRENT URL: ").append(url).append('\n');
         sb.append("TITLE: ").append(title).append('\n');
         sb.append("UNVISITED LINKS REMAINING: ").append(frontier.size()).append('\n');
@@ -647,7 +693,7 @@ public class BrowserAgent {
                     WebElement e = byIndex(action);
                     if (e != null) {
                         scrollTo(e);
-                        e.click();
+                        clickRobust(e);
                         waitForReady(0);
                     }
                 }
@@ -695,6 +741,25 @@ public class BrowserAgent {
         } catch (RuntimeException e) {
             log.accept("[agent] element index " + idx + " not found (page may have changed).");
             return null;
+        }
+    }
+
+    /**
+     * Click, falling back to a JS click when a real click is intercepted by an
+     * overlay (an open dropdown/menu or a modal covering the target). The JS click
+     * fires the element's own handler / follows its href, ignoring the overlay, so
+     * the agent doesn't waste steps retrying a blocked click.
+     */
+    private void clickRobust(WebElement e) {
+        try {
+            e.click();
+        } catch (org.openqa.selenium.ElementClickInterceptedException intercepted) {
+            try {
+                ((JavascriptExecutor) driver).executeScript("arguments[0].click();", e);
+                log.accept("[agent] (click was intercepted by an overlay -> clicked via JS)");
+            } catch (RuntimeException ignored) {
+                throw intercepted;
+            }
         }
     }
 
@@ -1101,6 +1166,35 @@ public class BrowserAgent {
         } catch (RuntimeException e) {
             return null;
         }
+    }
+
+    /** Short human-readable target of an action, for the step log. */
+    private static String targetDesc(String type, JsonObject a, java.util.List<JsonObject> elems) {
+        if ("goto".equals(type)) {
+            return " -> " + trunc(getStr(a, "url", ""), 70);
+        }
+        if ("click".equals(type) || "type".equals(type)) {
+            String idx = a.has("index") ? " #" + getStr(a, "index", "?") : "";
+            JsonObject el = elementOf(a, elems);
+            if ("type".equals(type)) {
+                // Log what was actually TYPED (not the field's placeholder), masking
+                // password-ish fields so credentials never land in the log.
+                String fieldName = el != null ? getStr(el, "name", "") : "";
+                String elType = el != null ? getStr(el, "type", "") : "";
+                String lowName = fieldName.toLowerCase();
+                boolean secret = "password".equalsIgnoreCase(elType)
+                        || lowName.contains("pass") || lowName.contains("pwd");
+                String typed = secret ? "***" : trunc(getStr(a, "text", ""), 40);
+                return idx + (fieldName.isBlank() ? "" : " [" + fieldName + "]") + " <= '" + typed + "'";
+            }
+            if (el != null) {
+                String href = getStr(el, "href", "");
+                String tgt = !href.isBlank() ? href : getStr(el, "text", "");
+                return idx + (tgt.isBlank() ? "" : " '" + trunc(tgt, 50) + "'");
+            }
+            return idx;
+        }
+        return "";
     }
 
     private static String describe(JsonObject a) {

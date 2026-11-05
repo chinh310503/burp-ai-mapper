@@ -76,7 +76,8 @@ Mỗi bước: thu thập **link in-scope** của trang vào **frontier** (hàng
 - **Hoàn tất** = frontier rỗng **và** không có hoạt động mới trong `DONE_STABLE` (5) bước.
 - Model báo `done` nhưng **còn link chưa thăm** → bỏ qua, nhảy tới URL kế trong frontier (verify trước khi dừng).
 - **Kẹt/lặp** `STUCK_LIMIT` (4) bước mà frontier còn link → **không dừng**, mà nhảy tới một URL chưa thăm (đổi chiến lược).
-- `Max steps` chỉ là van an toàn (giới hạn cứng tổng số vòng), không phải tín hiệu hoàn tất.
+- `Max steps` = **0** (mặc định mới) nghĩa là **crawl tới khi hết** sitemap: chỉ dừng khi frontier rỗng (hoặc bạn bấm Stop), có trần an toàn 100.000 bước để tránh lặp vô hạn. Đặt số dương nếu muốn giới hạn cứng — khi đó log sẽ cảnh báo nếu chạm trần mà còn link chưa thăm.
+- **Ghi log ra file:** điền **Log file** (hoặc để trống → `<output dir>/ai-mapper.log`) để lưu lại từng bước agent làm (URL hiện tại, action + mục tiêu, queue, lý do, hành động bị chặn) — tiện để rà soát và tinh chỉnh độ phủ.
 
 (Các ngưỡng `STUCK_LIMIT` / `DONE_STABLE` / `MAX_FRONTIER` / `SAMPLES_PER_TEMPLATE` nằm đầu `BrowserAgent.java`; scope = cùng host với Target URL. Site thiên id tuần tự muốn chắc hơn thì tăng `SAMPLES_PER_TEMPLATE` lên 3.)
 
