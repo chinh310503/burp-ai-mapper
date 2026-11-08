@@ -271,7 +271,8 @@ public class MapperTab {
             // pushState pages), filtered by the same host/scope rules as the records.
             List<String> extra = filterClientUrls(agent.discoveredUrls());
             SitemapGenerator.write(recs, outDir, extra);
-            log("[export] Wrote sitemap.xml and urls.json (" + recs.size() + " proxy records + "
+            log("[export] Wrote sitemap.xml, urls.json, endpoints.json and mutations.json "
+                    + "(data added/modified) (" + recs.size() + " proxy records + "
                     + extra.size() + " client-only URLs) to " + outDir);
         });
     }

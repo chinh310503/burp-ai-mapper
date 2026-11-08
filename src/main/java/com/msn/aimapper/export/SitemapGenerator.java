@@ -48,6 +48,76 @@ public final class SitemapGenerator {
         writeXml(records, extra, outDir.resolve("sitemap.xml"));
         writeJson(records, extra, outDir.resolve("urls.json"));
         writeEndpoints(records, outDir.resolve("endpoints.json"));
+        writeMutations(records, outDir.resolve("mutations.json"));
+    }
+
+    /**
+     * Audit trail of data CHANGES: every non-GET request the agent actually sent
+     * (POST/PUT/PATCH/DELETE, response present) with its request body, so you can
+     * review - or undo - anything that was created or modified during the crawl.
+     * Secrets in the URL/body are redacted. Classified as create/update/delete.
+     */
+    private static void writeMutations(Iterable<HttpRequestResponse> records, Path file)
+            throws IOException {
+        JsonArray arr = new JsonArray();
+        java.util.Set<String> seen = new java.util.LinkedHashSet<>();
+        for (HttpRequestResponse rr : records) {
+            HttpRequest req = rr.request();
+            if (req == null) {
+                continue;
+            }
+            String method = req.method() == null ? "" : req.method().toUpperCase();
+            if (method.isEmpty() || method.equals("GET") || method.equals("HEAD")
+                    || method.equals("OPTIONS")) {
+                continue; // only state-changing verbs
+            }
+            HttpResponse resp = rr.response();
+            if (resp == null) {
+                continue; // only requests that were actually sent (a real change)
+            }
+            String body = "";
+            try {
+                body = req.bodyToString();
+            } catch (RuntimeException ignored) {
+                body = "";
+            }
+            if (body == null) {
+                body = "";
+            }
+            String key = method + " " + req.url() + " " + body;
+            if (!seen.add(key)) {
+                continue;
+            }
+            JsonObject o = new JsonObject();
+            o.addProperty("kind", classifyMutation(method, req.url()));
+            o.addProperty("method", method);
+            o.addProperty("url", Redactor.redactUrl(req.url()));
+            o.addProperty("status", (int) resp.statusCode());
+            if (!body.isBlank()) {
+                String ct = SiteMapExtractor.header(req, "Content-Type");
+                String shown = body.length() > 2000 ? body.substring(0, 2000) + "...[truncated]" : body;
+                o.addProperty("requestBody", Redactor.redactBody(ct, shown));
+            }
+            arr.add(o);
+        }
+        String json = new GsonBuilder().setPrettyPrinting().create().toJson(arr);
+        Files.write(file, json.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** Best-effort create/update/delete label from the verb and path. */
+    private static String classifyMutation(String method, String url) {
+        String u = url == null ? "" : url.toLowerCase();
+        if ("DELETE".equals(method) || u.matches(".*(^|[/?&=._-])(delete|destroy|remove)([/?&=._-]|$).*")) {
+            return "delete";
+        }
+        if (u.contains("/new") || u.contains("/create") || u.contains("/register")
+                || u.contains("/signup") || u.contains("/sign-up")) {
+            return "create";
+        }
+        if (u.contains("/edit") || u.contains("/update") || "PUT".equals(method) || "PATCH".equals(method)) {
+            return "update";
+        }
+        return "POST".equals(method) ? "create-or-submit" : method.toLowerCase();
     }
 
     private static void writeXml(Iterable<HttpRequestResponse> records,

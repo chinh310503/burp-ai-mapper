@@ -244,6 +244,10 @@ public class BrowserAgent {
     private volatile String targetHostField; // host of the current run, for coverage lookup
     private volatile int samplesPerTemplate = SAMPLES_PER_TEMPLATE; // from cfg at run start
     private volatile boolean visionNoted;     // log vision-fallback use only once
+    // Form fields the agent has typed on the CURRENT page, to log a "DATA CHANGE"
+    // audit line when it submits (create/edit). Cleared on navigation.
+    private final java.util.LinkedHashMap<String, String> formData = new java.util.LinkedHashMap<>();
+    private volatile String formPage;
     /** The account the current pass must log in as (null = prompt-driven single pass). */
     private volatile Account activeAccount;
     /**
@@ -418,6 +422,8 @@ public class BrowserAgent {
                 frontier.remove(url);
                 if (newUrl) {
                     discovered.add(url);
+                    formData.clear();    // new page -> drop any half-typed form context
+                    formPage = null;
                     waitForReady(400);   // let async (AJAX) content load before harvesting
                     exhaustPage();       // scroll + click "load more" to surface appended links
                 }
@@ -559,6 +565,7 @@ public class BrowserAgent {
                         while (recent.size() > 8) {
                             recent.removeFirst();
                         }
+                        trackFormData(type, act, elems, url); // audit data create/edit
                         boolean ok = execute(action, type);
                         // Mark the REQUESTED goto url visited (only if navigation
                         // succeeded) even if it redirects elsewhere, so a redirecting
@@ -1309,6 +1316,49 @@ public class BrowserAgent {
             return JsonParser.parseString(s.substring(a, b + 1)).getAsJsonObject();
         } catch (RuntimeException e) {
             return null;
+        }
+    }
+
+    /**
+     * Audit the agent's data changes: remember the fields it types, and when it
+     * submits a form (create/edit) emit a "DATA CHANGE" line listing those fields
+     * (passwords masked). Login/search submits are not data changes and are skipped.
+     * This is the live trail; mutations.json (from the proxy) is the full record.
+     */
+    private void trackFormData(String type, JsonObject a, java.util.List<JsonObject> elems, String url) {
+        if ("type".equals(type)) {
+            JsonObject el = elementOf(a, elems);
+            String name = el != null ? getStr(el, "name", "") : "";
+            String etype = el != null ? getStr(el, "type", "") : "";
+            if (name.isBlank()) {
+                name = "field#" + getStr(a, "index", "?");
+            }
+            String low = name.toLowerCase();
+            boolean secret = "password".equalsIgnoreCase(etype)
+                    || low.contains("pass") || low.contains("pwd");
+            formData.put(name, secret ? "***" : trunc(getStr(a, "text", ""), 120));
+            formPage = url;
+        } else if ("click".equals(type)) {
+            JsonObject el = elementOf(a, elems);
+            String label = (el != null ? getStr(el, "text", "") : "").trim();
+            String etype = el != null ? getStr(el, "type", "") : "";
+            String low = label.toLowerCase();
+            boolean authOrSearch = low.matches(".*(sign\\s?in|log\\s?in|login|search).*");
+            boolean mutating = !authOrSearch && (!formData.isEmpty()
+                    || "submit".equalsIgnoreCase(etype)
+                    || low.matches(".*(save|create|update|add|send|submit|post|register|"
+                        + "place\\s?order|confirm).*"));
+            if (mutating) {
+                String page = formPage != null ? formPage : url;
+                log.accept("[agent] DATA CHANGE: submitted form on " + page
+                        + (label.isBlank() ? "" : " [" + trunc(label, 40) + "]")
+                        + (formData.isEmpty() ? "" : " fields=" + formData));
+            }
+            formData.clear();
+            formPage = null;
+        } else if ("goto".equals(type) || "back".equals(type)) {
+            formData.clear();
+            formPage = null;
         }
     }
 

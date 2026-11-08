@@ -50,6 +50,8 @@ Kết quả trong Output dir:
 - `endpoints.json` — **danh sách API đã khử trùng**, theo `method + shape` (GET `/products/{id}` khác DELETE `/products/{id}`), kèm `count` + `examples`.
 - `openapi.json` — OpenAPI 3.1 (gom `/users/123` → `/users/{id}`; suy luận **schema JSON đệ quy** cho request + **response body**, gộp nhiều mẫu với `required`/`nullable`; **security scheme** cookie/bearer quan sát được; **tags** theo segment path đầu).
 
+- `mutations.json` — **nhật ký audit dữ liệu đã thêm/sửa**: mọi request **không phải GET** agent thực sự gửi (POST/PUT/PATCH/DELETE có response) kèm **body đã gửi**, phân loại `create`/`update`/`delete`, redact secret. Dùng để rà soát — hoặc hoàn tác — những gì bị tạo/sửa trong lúc crawl (phòng phá hoại dữ liệu). Agent cũng ghi realtime dòng `DATA CHANGE: submitted form on … fields={…}` vào log khi submit form.
+
 **Redact secret:** mọi bản xuất tự che giá trị nhạy cảm (password/token/api key/session/signature…) trong URL và body example — an toàn để chia sẻ.
 
 **Chấm điểm:** điền **Ground-truth URLs file** rồi bấm **Score vs ground-truth** để diff kết quả (URL GET của Burp + route client-only) với danh sách chuẩn và in coverage % + các URL còn thiếu.
