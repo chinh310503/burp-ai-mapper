@@ -72,6 +72,12 @@ public class MapperTab {
     private final JTextField outputDir = new JTextField();
     private final JTextField hostFilter = new JTextField();
     private final JCheckBox inScopeOnly = new JCheckBox("In-scope only", true);
+    // Keep only traffic whose host matches the Target URL's host. On by default: it
+    // removes the browser's own telemetry (google/gvt/googleapis...) and does NOT
+    // depend on Burp's scope, so exports don't come back empty when the target isn't
+    // in scope. Uncheck it to use the Host filter / In-scope only rules instead.
+    private final JCheckBox targetHostOnly =
+            new JCheckBox("Target host only (ignore other hosts)", true);
     private final JTextField groundTruth = new JTextField();
     private final JTextField logFile = new JTextField();
 
@@ -144,6 +150,8 @@ public class MapperTab {
         form.add(outputRow());
         form.add(row("Host filter (substring)", hostFilter));
         JPanel scope = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        scope.add(targetHostOnly);
+        scope.add(javax.swing.Box.createHorizontalStrut(16));
         scope.add(inScopeOnly);
         form.add(scope);
         form.add(row("Ground-truth URLs file (optional, for scoring)", groundTruth));
@@ -226,10 +234,39 @@ public class MapperTab {
         new Thread(() -> agent.run(cfg, llm), "ai-mapper-agent").start();
     }
 
+    /**
+     * Host substring to keep when exporting. "Target host only" takes the host of the
+     * Target URL (so the browser's own telemetry is dropped and Burp scope isn't
+     * needed); otherwise the Host filter field is used.
+     */
+    private String effectiveHostFilter() {
+        if (targetHostOnly.isSelected()) {
+            String h = hostOf(targetUrl.getText().trim());
+            if (h != null && !h.isBlank()) {
+                return h;
+            }
+        }
+        return hostFilter.getText().trim();
+    }
+
+    /** In-scope filtering only applies when NOT using target-host-only. */
+    private boolean effectiveScoped() {
+        return inScopeOnly.isSelected() && !targetHostOnly.isSelected();
+    }
+
+    private static String hostOf(String url) {
+        try {
+            String h = java.net.URI.create(url).getHost();
+            return h == null ? "" : h;
+        } catch (RuntimeException e) {
+            return "";
+        }
+    }
+
     private void onExportSitemap() {
         runExport("sitemap", outDir -> {
             List<HttpRequestResponse> recs = SiteMapExtractor.collect(
-                    api, hostFilter.getText().trim(), inScopeOnly.isSelected());
+                    api, effectiveHostFilter(), effectiveScoped());
             // Client-only routes the agent reached but the proxy never saw (hash / SPA
             // pushState pages), filtered by the same host/scope rules as the records.
             List<String> extra = filterClientUrls(agent.discoveredUrls());
@@ -239,10 +276,10 @@ public class MapperTab {
         });
     }
 
-    /** Apply the Host filter / In-scope only settings to the agent's client-only URLs. */
+    /** Apply the host / scope settings to the agent's client-only URLs. */
     private List<String> filterClientUrls(java.util.Collection<String> urls) {
-        String needle = hostFilter.getText().trim().toLowerCase();
-        boolean scoped = inScopeOnly.isSelected();
+        String needle = effectiveHostFilter().toLowerCase();
+        boolean scoped = effectiveScoped();
         List<String> out = new java.util.ArrayList<>();
         for (String u : urls) {
             if (u == null || u.isBlank()) {
@@ -268,8 +305,9 @@ public class MapperTab {
     private void onExportApi() {
         runExport("openapi", outDir -> {
             List<HttpRequestResponse> recs = SiteMapExtractor.collect(
-                    api, hostFilter.getText().trim(), inScopeOnly.isSelected());
-            String title = hostFilter.getText().isBlank() ? "Discovered API" : hostFilter.getText().trim();
+                    api, effectiveHostFilter(), effectiveScoped());
+            String hf = effectiveHostFilter();
+            String title = hf.isBlank() ? "Discovered API" : hf;
             OpenApiGenerator.write(recs, outDir, title);
             log("[export] Wrote openapi.json (from " + recs.size() + " records) to " + outDir);
         });
@@ -334,7 +372,8 @@ public class MapperTab {
                     return;
                 }
                 java.util.Set<String> found = new java.util.TreeSet<>();
-                String needle = hostFilter.getText().trim().toLowerCase();
+                String needle = effectiveHostFilter().toLowerCase();
+                boolean scoped = effectiveScoped();
                 for (HttpRequestResponse rr : api.siteMap().requestResponses()) {
                     var req = rr.request();
                     if (req == null || !"GET".equalsIgnoreCase(req.method())) {
@@ -344,7 +383,7 @@ public class MapperTab {
                     if (!needle.isEmpty() && !url.toLowerCase().contains(needle)) {
                         continue;
                     }
-                    if (inScopeOnly.isSelected()) {
+                    if (scoped) {
                         try {
                             if (!api.scope().isInScope(url)) {
                                 continue;
@@ -432,6 +471,10 @@ public class MapperTab {
             if (s != null) {
                 inScopeOnly.setSelected(s);
             }
+            Boolean tho = p.getBoolean("targetHostOnly");
+            if (tho != null) {
+                targetHostOnly.setSelected(tho);
+            }
         } catch (RuntimeException ignored) {
             // persistence is best-effort; ignore if unavailable
         }
@@ -460,6 +503,7 @@ public class MapperTab {
             p.setBoolean("vision", vision.isSelected());
             p.setBoolean("blockDestructive", blockDestructive.isSelected());
             p.setBoolean("inScopeOnly", inScopeOnly.isSelected());
+            p.setBoolean("targetHostOnly", targetHostOnly.isSelected());
         } catch (RuntimeException ignored) {
             // persistence is best-effort; ignore if unavailable
         }

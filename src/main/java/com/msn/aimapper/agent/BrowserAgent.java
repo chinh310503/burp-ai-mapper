@@ -490,7 +490,9 @@ public class BrowserAgent {
                     log.accept("[agent] Model said done but ~" + (frontier.size() + 1)
                             + " links remain -> continuing to " + trunc(next, 80));
                     if (gotoUrl(next)) {
-                        visited.add(normalizeUrl(next)); // requested url (redirects won't re-queue it)
+                        String n = normalizeUrl(next);
+                        visited.add(n);      // requested url (redirects won't re-queue it)
+                        discovered.add(n);   // keep it in the export (client-only routes too)
                     }
                     noProgress = 0;
                     sleep(700);
@@ -529,7 +531,9 @@ public class BrowserAgent {
                     log.accept("[agent] Stuck " + noProgress + " steps -> jumping to unvisited: "
                             + trunc(next, 80));
                     if (gotoUrl(next)) {
-                        visited.add(normalizeUrl(next)); // requested url (redirects won't re-queue it)
+                        String n = normalizeUrl(next);
+                        visited.add(n);      // requested url (redirects won't re-queue it)
+                        discovered.add(n);   // keep it in the export (client-only routes too)
                     }
                     noProgress = 0;
                     sleep(700);
@@ -561,6 +565,7 @@ public class BrowserAgent {
                             String gu = normalizeUrl(getStr(act, "url", ""));
                             if (!gu.isBlank()) {
                                 visited.add(gu);
+                                discovered.add(gu); // keep client-only routes in the export
                                 frontier.remove(gu);
                             }
                         }
