@@ -48,20 +48,24 @@ public class BrowserAgent {
             delete/logout/reset/pay action you pick will be blocked and skipped, so do \
             not waste steps on them - map those endpoints by reading the page, not by \
             triggering them.
-            LOGIN: to sign in you MUST fill EVERY field of the login form before \
-            submitting. Do it in this order, one action per step: first "type" the \
-            username/email into its field, then "type" the password into the password \
-            field (type=password), and ONLY THEN "click" the submit button. NEVER click \
-            submit while the password field is still empty. After a failed attempt the \
-            form reloads EMPTY, so re-type BOTH the username and the password again \
-            before submitting. Use the exact credentials from the ACTIVE ACCOUNT / TASK. \
-            The ELEMENTS list marks each field "(empty)" or "(filled)" and the state \
-            shows a LOGIN FORM hint with the exact field indices - follow it. \
-            For a one-shot submit you may use "enter":true on the password "type" action. \
+            LOGIN: to sign in, fill EVERY field of the login form, then submit. The most \
+            reliable way is TWO actions: first "type" the username into its field, then \
+            "type" the password into the password field (type=password) WITH "enter":true \
+            - this fills the password AND submits in one step. Only fall back to a \
+            separate "click" on the submit button if enter:true does not work. NEVER \
+            submit while the password field is still EMPTY. Use the EXACT credentials from \
+            the ACTIVE ACCOUNT / TASK. The ELEMENTS list marks each field "(empty)" or \
+            "(filled)" and the state shows a LOGIN FORM hint with the exact indices - \
+            follow it. Submitting a login is NOT a forbidden repeat: if you are still on \
+            the login page, you MAY re-type the credentials and submit again (the form \
+            reloads EMPTY after a failed attempt), even if a similar action appears in \
+            ALREADY DONE. Keep retrying the login (not browsing elsewhere) until you leave \
+            the login page. \
             COVERAGE: the state shows UNVISITED LINKS REMAINING and a sample of them. \
             Your job is to drive that number to 0. Prefer clicking links / using "goto" \
             to reach unvisited URLs, and open menus/forms that may reveal more links. Do \
-            NOT repeat actions listed in ALREADY DONE. Do NOT manually enumerate \
+            NOT repeat actions listed in ALREADY DONE (EXCEPT submitting a login form, \
+            which you may repeat until you are signed in). Do NOT manually enumerate \
             sequential ids (e.g. /item/1, /item/2, /item/3 ...): one or two examples of \
             each URL shape already map the endpoint - the proxy records the pattern. \
             Spend steps on NEW shapes/features instead.
@@ -750,18 +754,24 @@ public class BrowserAgent {
                 break;
             }
         }
-        StringBuilder sb = new StringBuilder("LOGIN FORM DETECTED - sign in before exploring. ");
+        StringBuilder sb = new StringBuilder("LOGIN FORM DETECTED - sign in with the "
+                + "ACTIVE ACCOUNT before exploring. ");
         if (userIdx >= 0) {
-            sb.append("Username field = index ").append(userIdx)
-                    .append(userFilled ? " (filled)" : " (EMPTY - type the username here)").append(". ");
+            sb.append("Step 1: type the username into index ").append(userIdx)
+                    .append(userFilled ? " (filled). " : " (EMPTY). ");
         }
-        sb.append("Password field = index ").append(pwIdx)
-                .append(pwFilled ? " (filled)" : " (EMPTY - type the password here)").append(". ");
+        sb.append("Step 2 (BEST - submits in one action): type the password into index ")
+                .append(pwIdx)
+                .append(" WITH enter=true, i.e. {\"action\":\"type\",\"index\":").append(pwIdx)
+                .append(",\"text\":\"<password>\",\"enter\":true}. ");
         if (submitIdx >= 0) {
-            sb.append("Submit = index ").append(submitIdx).append(". ");
+            sb.append("(Alternatively, after both fields are filled, click submit at index ")
+                    .append(submitIdx).append(".) ");
         }
-        sb.append("Fill BOTH fields with the ACTIVE ACCOUNT credentials, THEN submit; "
-                + "do NOT submit while the password is EMPTY.");
+        sb.append("Re-submitting the login is EXPECTED and allowed - do NOT skip it just "
+                + "because a similar action is in ALREADY DONE. After a failed attempt the "
+                + "form reloads EMPTY, so re-type BOTH fields, then submit again. Never submit "
+                + "while the password is EMPTY.");
         return sb.toString();
     }
 
