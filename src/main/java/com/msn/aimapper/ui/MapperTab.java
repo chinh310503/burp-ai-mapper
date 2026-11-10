@@ -68,9 +68,11 @@ public class MapperTab {
             new JCheckBox("Block destructive actions (delete / logout / reset / pay)", true);
     private final JTextField extraBlockKeywords = new JTextField();
 
-    // Data restore (call an app reset endpoint to undo crawl mutations)
+    // Data restore / rollback (undo crawl mutations)
+    private final JCheckBox autoRollback =
+            new JCheckBox("Auto-rollback edited records to original when crawl finishes", true);
     private final JTextField restoreRequest = new JTextField();
-    private final JCheckBox restoreAfterCrawl = new JCheckBox("Auto-restore when crawl finishes");
+    private final JCheckBox restoreAfterCrawl = new JCheckBox("Also auto-call the reset endpoint");
 
     // Export
     private final JTextField outputDir = new JTextField();
@@ -149,7 +151,10 @@ public class MapperTab {
         sb.add(blockDestructive);
         form.add(sb);
         form.add(row("Extra block keywords (optional)", extraBlockKeywords));
-        form.add(row("Restore request (e.g. POST /admin/reset)", restoreRequest));
+        JPanel arb = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        arb.add(autoRollback);
+        form.add(arb);
+        form.add(row("Restore request (optional, e.g. POST /admin/reset)", restoreRequest));
         JPanel rb = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         rb.add(restoreAfterCrawl);
         rb.add(javax.swing.Box.createHorizontalStrut(12));
@@ -238,6 +243,7 @@ public class MapperTab {
         cfg.extraBlockKeywords = extraBlockKeywords.getText().trim();
         cfg.restoreRequest = restoreRequest.getText().trim();
         cfg.restoreAfterCrawl = restoreAfterCrawl.isSelected();
+        cfg.autoRollback = autoRollback.isSelected();
         return cfg;
     }
 
@@ -517,6 +523,10 @@ public class MapperTab {
             if (rac != null) {
                 restoreAfterCrawl.setSelected(rac);
             }
+            Boolean arb = p.getBoolean("autoRollback");
+            if (arb != null) {
+                autoRollback.setSelected(arb);
+            }
             setIf(p.getString("outputDir"), outputDir);
             setIf(p.getString("hostFilter"), hostFilter);
             setIf(p.getString("groundTruth"), groundTruth);
@@ -563,6 +573,7 @@ public class MapperTab {
             p.setString("extraBlockKeywords", extraBlockKeywords.getText());
             p.setString("restoreRequest", restoreRequest.getText());
             p.setBoolean("restoreAfterCrawl", restoreAfterCrawl.isSelected());
+            p.setBoolean("autoRollback", autoRollback.isSelected());
             p.setString("outputDir", outputDir.getText());
             p.setString("hostFilter", hostFilter.getText());
             p.setString("groundTruth", groundTruth.getText());

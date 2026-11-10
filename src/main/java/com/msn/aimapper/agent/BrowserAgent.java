@@ -312,6 +312,18 @@ public class BrowserAgent {
             return new java.util.ArrayList<>(rollback);
         }
     }
+
+    /** True if any EDIT was recorded that auto-rollback can restore. */
+    public boolean hasRecordedUpdates() {
+        synchronized (rollback) {
+            for (RollbackAction a : rollback) {
+                if ("update".equals(a.kind())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
     /** The account the current pass must log in as (null = prompt-driven single pass). */
     private volatile Account activeAccount;
     /**
@@ -673,17 +685,26 @@ public class BrowserAgent {
                     + " destructive actions blocked. "
                     + "Switch to Burp and click 'Export sitemap' / 'Export OpenAPI'.");
 
-            if (cfg.restoreAfterCrawl && !stop && !cfg.restoreRequest.isBlank()) {
+            // Automatic environment restore after the crawl (no button needed).
+            boolean doRollback = cfg.autoRollback && !stop && hasRecordedUpdates();
+            boolean doReset = cfg.restoreAfterCrawl && !stop && !cfg.restoreRequest.isBlank();
+            if (doRollback || doReset) {
                 ChromeDriver crawlDriver = driver;
-                driver = null;   // hand the field off so stop() won't fight the restore
+                driver = null;   // hand the field off so stop() won't fight the restore driver
                 if (crawlDriver != null) {
                     try {
                         crawlDriver.quit();
                     } catch (RuntimeException ignored) {
                     }
                 }
-                log.accept("[agent] Auto-restore enabled -> restoring target data to seed.");
-                restore(cfg);
+                if (doRollback) {
+                    log.accept("[agent] Auto-rollback: restoring edited records to their "
+                            + "original values (newly created records are left as-is).");
+                    runRollback(cfg);   // also fires the reset endpoint if one is configured
+                } else {
+                    log.accept("[agent] Auto-restore enabled -> calling the reset endpoint.");
+                    restore(cfg);
+                }
             }
         } catch (WebDriverException e) {
             log.accept("[agent] Browser error: " + e.getMessage()
@@ -865,9 +886,7 @@ public class BrowserAgent {
                         log.accept("[rollback] UPDATE " + a.url() + " failed: " + shortMsg(e));
                     }
                 } else {
-                    manual++;
-                    log.accept("[rollback] MANUAL (" + a.kind() + ") " + a.url()
-                            + " - delete the created record or use the reset endpoint.");
+                    manual++;   // created records are intentionally left as-is
                 }
             }
             RestoreSpec spec = parseRestore(cfg.restoreRequest);
@@ -881,8 +900,8 @@ public class BrowserAgent {
                         + ".then(x=>cb(x.status)).catch(e=>cb('ERR:'+e));", url, spec.method());
                 log.accept("[rollback] reset " + spec.method() + " " + url + " -> " + r);
             }
-            log.accept("[rollback] Done: " + restored + " update(s) restored, "
-                    + manual + " create(s) need manual delete / reset.");
+            log.accept("[rollback] Done: " + restored + " edited record(s) restored to original"
+                    + (manual > 0 ? ", " + manual + " created record(s) left as-is." : "."));
         } catch (RuntimeException e) {
             log.accept("[rollback] FAILED: " + shortMsg(e));
         } finally {

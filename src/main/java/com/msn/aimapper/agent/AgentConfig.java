@@ -35,7 +35,12 @@ public class AgentConfig {
     // The restore step logs in as the admin account (deterministically) first, since
     // reset endpoints are usually admin-only.
     public String restoreRequest = "";
-    public boolean restoreAfterCrawl = false;  // auto-call it when the crawl finishes
+    public boolean restoreAfterCrawl = false;  // auto-call the reset endpoint when crawl finishes
+    // Auto-rollback: when the crawl finishes, automatically restore every record the
+    // agent EDITED back to its original values (re-submit the pre-edit values). Newly
+    // CREATED records are left as-is (not deleted). On by default so a pentest
+    // environment is returned to its prior state without any button click.
+    public boolean autoRollback = true;
 
     // Proxy = Burp's proxy listener.
     public String proxyHost = "127.0.0.1";

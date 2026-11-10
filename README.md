@@ -111,7 +111,7 @@ Crawl có thể tạo/sửa dữ liệu (xem `mutations.json`). Mục **Safety �
 
 Phương pháp black-box tổng quát: agent **snapshot giá trị gốc** của form khi vào trang, và khi submit create/edit thì ghi lại cách hoàn tác.
 
-- Bấm **"Run rollback"**: login admin → mỗi **edit** được khôi phục bằng cách **gửi lại giá trị gốc** (re-POST), mỗi **create** được báo để xóa tay / dùng reset endpoint; nếu có `Restore request` thì gọi luôn (phủ cả create).
+- **Tự động** (mặc định bật — checkbox "Auto-rollback edited records to original when crawl finishes"): **ngay sau khi crawl xong**, agent login admin và **gửi lại giá trị gốc** cho mọi bản ghi đã sửa → môi trường pentest về như cũ, **không cần bấm nút**. Bản ghi **tạo mới** được giữ nguyên (không xóa). Nút **"Run rollback"** chỉ là tùy chọn chạy lại thủ công.
 - Export sinh **`rollback-plan.json`** (redact secret) để review trước khi chạy.
 - Giới hạn: edit khôi phục tổng quát; **create** black-box không tự xóa an toàn (không chắc id mới) → cần reset endpoint hoặc xóa tay. Mật khẩu không bị re-submit (giữ nguyên).
 
