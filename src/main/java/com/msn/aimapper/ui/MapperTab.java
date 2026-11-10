@@ -68,6 +68,10 @@ public class MapperTab {
             new JCheckBox("Block destructive actions (delete / logout / reset / pay)", true);
     private final JTextField extraBlockKeywords = new JTextField();
 
+    // Data restore (call an app reset endpoint to undo crawl mutations)
+    private final JTextField restoreRequest = new JTextField();
+    private final JCheckBox restoreAfterCrawl = new JCheckBox("Auto-restore when crawl finishes");
+
     // Export
     private final JTextField outputDir = new JTextField();
     private final JTextField hostFilter = new JTextField();
@@ -145,6 +149,15 @@ public class MapperTab {
         sb.add(blockDestructive);
         form.add(sb);
         form.add(row("Extra block keywords (optional)", extraBlockKeywords));
+        form.add(row("Restore request (e.g. POST /admin/reset)", restoreRequest));
+        JPanel rb = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        rb.add(restoreAfterCrawl);
+        rb.add(javax.swing.Box.createHorizontalStrut(12));
+        JButton restoreNow = new JButton("Restore now");
+        restoreNow.setToolTipText("Log in as admin and call the Restore request to reset data");
+        restoreNow.addActionListener(e -> onRestore());
+        rb.add(restoreNow);
+        form.add(rb);
 
         form.add(section("5. Export"));
         form.add(outputRow());
@@ -198,7 +211,8 @@ public class MapperTab {
         loadPrefs();
     }
 
-    private void onStart() {
+    /** Build an AgentConfig from the current UI fields. */
+    private AgentConfig buildConfig() {
         AgentConfig cfg = new AgentConfig();
         cfg.prompt = prompt.getText();
         cfg.targetUrl = targetUrl.getText().trim();
@@ -216,6 +230,30 @@ public class MapperTab {
         cfg.vision = vision.isSelected();
         cfg.blockDestructive = blockDestructive.isSelected();
         cfg.extraBlockKeywords = extraBlockKeywords.getText().trim();
+        cfg.restoreRequest = restoreRequest.getText().trim();
+        cfg.restoreAfterCrawl = restoreAfterCrawl.isSelected();
+        return cfg;
+    }
+
+    /** Manually restore target data (log in as admin, call the Restore request). */
+    private void onRestore() {
+        AgentConfig cfg = buildConfig();
+        if (cfg.targetUrl.isBlank() || cfg.targetUrl.equals("https://")) {
+            log("[ui] Enter a Target URL first.");
+            return;
+        }
+        if (cfg.restoreRequest.isBlank()) {
+            log("[ui] Enter a Restore request first (e.g. 'POST /admin/reset').");
+            return;
+        }
+        savePrefs();
+        resolveLogFile();
+        log("[ui] Restoring target data via " + cfg.restoreRequest + " ...");
+        new Thread(() -> agent.restore(cfg), "ai-mapper-restore").start();
+    }
+
+    private void onStart() {
+        AgentConfig cfg = buildConfig();
 
         if (cfg.targetUrl.isBlank() || cfg.targetUrl.equals("https://")) {
             log("[ui] Enter a Target URL first.");
@@ -452,6 +490,11 @@ public class MapperTab {
             setIf(p.getString("temperature"), temperature);
             setIf(p.getString("maxTokens"), maxTokens);
             setIf(p.getString("extraBlockKeywords"), extraBlockKeywords);
+            setIf(p.getString("restoreRequest"), restoreRequest);
+            Boolean rac = p.getBoolean("restoreAfterCrawl");
+            if (rac != null) {
+                restoreAfterCrawl.setSelected(rac);
+            }
             setIf(p.getString("outputDir"), outputDir);
             setIf(p.getString("hostFilter"), hostFilter);
             setIf(p.getString("groundTruth"), groundTruth);
@@ -496,6 +539,8 @@ public class MapperTab {
             p.setString("temperature", temperature.getText());
             p.setString("maxTokens", maxTokens.getText());
             p.setString("extraBlockKeywords", extraBlockKeywords.getText());
+            p.setString("restoreRequest", restoreRequest.getText());
+            p.setBoolean("restoreAfterCrawl", restoreAfterCrawl.isSelected());
             p.setString("outputDir", outputDir.getText());
             p.setString("hostFilter", hostFilter.getText());
             p.setString("groundTruth", groundTruth.getText());

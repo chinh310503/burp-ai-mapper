@@ -15,6 +15,7 @@ website để trích xuất sitemap + danh sách API, nhưng KHÔNG phá hoại 
 | [02-ai-web-agent-techniques.md](02-ai-web-agent-techniques.md) | State-of-the-art agent duyệt web: DOM vs a11y tree vs vision, action loop, structured output |
 | [03-api-discovery-and-openapi.md](03-api-discovery-and-openapi.md) | Bắt traffic (CDP), suy luận schema, sinh OpenAPI từ HAR/traffic |
 | [04-gap-analysis.md](04-gap-analysis.md) | Khoảng cách giữa hiện trạng và mục tiêu, map từng gap với test-case benchmark |
+| [05-data-restoration.md](05-data-restoration.md) | Khôi phục dữ liệu sau crawl (Strix + reset-endpoint/snapshot/compensation) |
 | [IMPROVEMENT-PLAN.md](IMPROVEMENT-PLAN.md) | **Kế hoạch cải thiện theo giai đoạn (P0→P4)** + tiêu chí nghiệm thu |
 
 ## Nguồn tham khảo chính

@@ -29,6 +29,14 @@ public class AgentConfig {
     // Optional extra keywords (comma/space separated) to also treat as destructive.
     public String extraBlockKeywords = "";
 
+    // Data restore: an app reset endpoint to call so data mutated during the crawl is
+    // returned to its seed state. Format: "METHOD url" (method optional, default POST),
+    // url absolute or relative to the target, e.g. "POST /admin/reset". Empty = off.
+    // The restore step logs in as the admin account (deterministically) first, since
+    // reset endpoints are usually admin-only.
+    public String restoreRequest = "";
+    public boolean restoreAfterCrawl = false;  // auto-call it when the crawl finishes
+
     // Proxy = Burp's proxy listener.
     public String proxyHost = "127.0.0.1";
     public int proxyPort = 8080;

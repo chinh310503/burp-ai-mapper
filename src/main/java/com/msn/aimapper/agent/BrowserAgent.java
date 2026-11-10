@@ -607,6 +607,19 @@ public class BrowserAgent {
                     + totalVisited + " URLs total, " + totalBlocked
                     + " destructive actions blocked. "
                     + "Switch to Burp and click 'Export sitemap' / 'Export OpenAPI'.");
+
+            if (cfg.restoreAfterCrawl && !stop && !cfg.restoreRequest.isBlank()) {
+                ChromeDriver crawlDriver = driver;
+                driver = null;   // hand the field off so stop() won't fight the restore
+                if (crawlDriver != null) {
+                    try {
+                        crawlDriver.quit();
+                    } catch (RuntimeException ignored) {
+                    }
+                }
+                log.accept("[agent] Auto-restore enabled -> restoring target data to seed.");
+                restore(cfg);
+            }
         } catch (WebDriverException e) {
             log.accept("[agent] Browser error: " + e.getMessage()
                     + "  (is Chrome/Chromium/Edge installed? set a binary path if needed)");
@@ -621,6 +634,157 @@ public class BrowserAgent {
                 }
             }
             driver = null;
+        }
+    }
+
+    // --- data restore (call an app reset endpoint) ---------------------------
+
+    /** Parsed restore request: an HTTP method + a URL. */
+    private record RestoreSpec(String method, String url) {
+    }
+
+    private static RestoreSpec parseRestore(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String s = raw.trim();
+        String method = "POST";
+        String url = s;
+        int sp = s.indexOf(' ');
+        if (sp > 0 && s.substring(0, sp).trim().toUpperCase().matches("GET|POST|PUT|PATCH|DELETE")) {
+            method = s.substring(0, sp).trim().toUpperCase();
+            url = s.substring(sp + 1).trim();
+        }
+        return url.isBlank() ? null : new RestoreSpec(method, url);
+    }
+
+    /** The admin account to use for restore (label/username hints at admin), else first. */
+    private static Account pickAdmin(java.util.List<Account> accounts) {
+        for (Account a : accounts) {
+            String l = (a.label() == null ? "" : a.label()).toLowerCase();
+            String u = (a.username() == null ? "" : a.username()).toLowerCase();
+            if (l.contains("admin") || l.contains("root") || l.contains("super")
+                    || u.contains("admin")) {
+                return a;
+            }
+        }
+        return accounts.isEmpty() ? null : accounts.get(0);
+    }
+
+    /**
+     * Restore the target's data by calling its reset endpoint (e.g. POST /admin/reset)
+     * so anything created/edited during the crawl is returned to the seed state. Opens
+     * a browser, logs in as the admin account (a DETERMINISTIC maintenance login, kept
+     * separate from the AI-driven crawl login), then fires the request with the session
+     * cookie. Safe to call from the UI thread via a background thread.
+     */
+    public void restore(AgentConfig cfg) {
+        RestoreSpec spec = parseRestore(cfg.restoreRequest);
+        if (spec == null) {
+            log.accept("[restore] No restore request configured (e.g. 'POST /admin/reset').");
+            return;
+        }
+        String origin = originOf(cfg.targetUrl);
+        String url = spec.url().toLowerCase().startsWith("http") ? spec.url()
+                : (origin == null ? spec.url()
+                   : origin + (spec.url().startsWith("/") ? spec.url() : "/" + spec.url()));
+        ChromeDriver d = null;
+        try {
+            d = newDriver(cfg);
+            d.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(30));
+            d.manage().timeouts().scriptTimeout(Duration.ofSeconds(20));
+            d.get(cfg.targetUrl);
+            Account admin = pickAdmin(parseAccounts(cfg.prompt));
+            if (admin != null) {
+                log.accept("[restore] Logging in as '" + admin.display() + "' before reset.");
+                codeLoginForRestore(d, admin, origin);
+            }
+            Object r = ((JavascriptExecutor) d).executeAsyncScript(
+                    "const cb=arguments[arguments.length-1];"
+                    + "fetch(arguments[0],{method:arguments[1],credentials:'include'})"
+                    + ".then(x=>cb(x.status)).catch(e=>cb('ERR:'+e));",
+                    url, spec.method());
+            log.accept("[restore] " + spec.method() + " " + url + " -> " + r
+                    + " (if 2xx/3xx, data should be back to its seed state).");
+        } catch (RuntimeException e) {
+            log.accept("[restore] FAILED: " + shortMsg(e)
+                    + "  (is the target reachable via the proxy? is the reset URL correct?)");
+        } finally {
+            if (d != null) {
+                try {
+                    d.quit();
+                } catch (RuntimeException ignored) {
+                }
+            }
+        }
+    }
+
+    /** Minimal deterministic login for the restore step only (not the crawl). */
+    private void codeLoginForRestore(ChromeDriver d, Account acct, String origin) {
+        try {
+            if (firstShown(d.findElements(By.cssSelector("input[type=password]"))) == null
+                    && origin != null) {
+                try {
+                    d.get(origin + "/login");
+                    waitReady(d);
+                } catch (RuntimeException ignored) {
+                }
+            }
+            WebElement pwf = firstShown(d.findElements(By.cssSelector("input[type=password]")));
+            if (pwf == null) {
+                log.accept("[restore] No login form found; trying the reset without login.");
+                return;
+            }
+            WebElement user = firstShown(d.findElements(By.cssSelector(
+                    "input[type=email],input[name*=user i],input[name*=email i],"
+                    + "input[name*=login i],input[type=text]")));
+            if (user != null) {
+                try {
+                    user.clear();
+                } catch (RuntimeException ignored) {
+                }
+                user.sendKeys(acct.username());
+            }
+            try {
+                pwf.clear();
+            } catch (RuntimeException ignored) {
+            }
+            pwf.sendKeys(acct.password());
+            pwf.sendKeys(Keys.RETURN);
+            waitReady(d);
+        } catch (RuntimeException e) {
+            log.accept("[restore] login step failed: " + shortMsg(e));
+        }
+    }
+
+    private static WebElement firstShown(java.util.List<WebElement> els) {
+        for (WebElement e : els) {
+            try {
+                if (e.isDisplayed()) {
+                    return e;
+                }
+            } catch (RuntimeException ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static void waitReady(ChromeDriver d) {
+        long end = System.currentTimeMillis() + 5000;
+        while (System.currentTimeMillis() < end) {
+            try {
+                if ("complete".equals(String.valueOf(((JavascriptExecutor) d)
+                        .executeScript("return document.readyState")))) {
+                    break;
+                }
+            } catch (RuntimeException ignored) {
+            }
+            try {
+                Thread.sleep(150);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            }
         }
     }
 

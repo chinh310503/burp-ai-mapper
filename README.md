@@ -98,6 +98,15 @@ Checkbox **"Block destructive actions"** (bật mặc định, ở mục **Safet
 
 > ⚠️ Mẫu ưu tiên AN TOÀN hơn độ phủ: một trang chỉ-đọc có chữ "delete" trong path cũng bị chặn. Muốn test cả flow phá hoại trên môi trường bỏ đi thì tắt checkbox (log sẽ cảnh báo).
 
+## Khôi phục dữ liệu sau crawl
+
+Crawl có thể tạo/sửa dữ liệu (xem `mutations.json`). Mục **Safety → Restore request** cho phép khôi phục bằng **reset endpoint của app** (cách tin cậy nhất — xem [research/05-data-restoration.md](research/05-data-restoration.md)):
+
+- Điền `Restore request`, ví dụ `POST /admin/reset` (hoặc URL tuyệt đối; method mặc định POST).
+- Bật **"Auto-restore when crawl finishes"** để tự gọi sau khi crawl xong, hoặc bấm **"Restore now"** bất cứ lúc nào.
+- Bước restore tự **đăng nhập admin bằng code** (bước bảo trì tất định, tách khỏi login AI khi crawl) rồi gọi request với cookie phiên. Log `[restore] POST … -> 200`.
+- Reset endpoint thường admin-only. Nếu app **không có** reset endpoint → đừng crawl ghi trên production; dùng DB snapshot hoặc môi trường throwaway.
+
 ## Bảo mật / phạm vi
 
 - Chỉ chạy trên hệ thống **bạn sở hữu hoặc được phép test**.
