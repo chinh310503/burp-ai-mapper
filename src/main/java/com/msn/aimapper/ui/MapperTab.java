@@ -157,6 +157,12 @@ public class MapperTab {
         restoreNow.setToolTipText("Log in as admin and call the Restore request to reset data");
         restoreNow.addActionListener(e -> onRestore());
         rb.add(restoreNow);
+        rb.add(javax.swing.Box.createHorizontalStrut(8));
+        JButton rollbackNow = new JButton("Run rollback");
+        rollbackNow.setToolTipText("Undo recorded edits by re-submitting original values "
+                + "(any target); creates are listed for manual delete");
+        rollbackNow.addActionListener(e -> onRollback());
+        rb.add(rollbackNow);
         form.add(rb);
 
         form.add(section("5. Export"));
@@ -252,6 +258,19 @@ public class MapperTab {
         new Thread(() -> agent.restore(cfg), "ai-mapper-restore").start();
     }
 
+    /** Undo recorded data changes (re-submit original values for edits) on any target. */
+    private void onRollback() {
+        AgentConfig cfg = buildConfig();
+        if (cfg.targetUrl.isBlank() || cfg.targetUrl.equals("https://")) {
+            log("[ui] Enter a Target URL first.");
+            return;
+        }
+        savePrefs();
+        resolveLogFile();
+        log("[ui] Running rollback of recorded data changes ...");
+        new Thread(() -> agent.runRollback(cfg), "ai-mapper-rollback").start();
+    }
+
     private void onStart() {
         AgentConfig cfg = buildConfig();
 
@@ -309,8 +328,11 @@ public class MapperTab {
             // pushState pages), filtered by the same host/scope rules as the records.
             List<String> extra = filterClientUrls(agent.discoveredUrls());
             SitemapGenerator.write(recs, outDir, extra);
-            log("[export] Wrote sitemap.xml, urls.json, endpoints.json and mutations.json "
-                    + "(data added/modified) (" + recs.size() + " proxy records + "
+            // Rollback plan: how to undo recorded edits/creates (any target).
+            String plan = agent.rollbackPlanJson();
+            java.nio.file.Files.writeString(outDir.resolve("rollback-plan.json"), plan);
+            log("[export] Wrote sitemap.xml, urls.json, endpoints.json, mutations.json and "
+                    + "rollback-plan.json (" + recs.size() + " proxy records + "
                     + extra.size() + " client-only URLs) to " + outDir);
         });
     }

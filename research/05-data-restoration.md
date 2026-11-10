@@ -46,9 +46,17 @@ B để người dùng tự cấu hình lệnh. C chỉ làm **bản kế hoạc
 2. **`mutations.json`** (đã có) = audit "đã thêm/sửa gì" để đối chiếu sau khi restore.
 3. **Snapshot/command (phương án B)** — *tùy chọn tương lai*: trường "Restore command"
    chạy lệnh shell người dùng cấp (ví dụ khôi phục DB snapshot) sau crawl.
-4. **Rollback plan (phương án C)** — *tùy chọn tương lai*: cần bắt **giá trị-trước-khi-sửa**
-   (đọc form edit trước khi submit) để sinh `rollback-plan.json` (update→re-submit giá trị cũ,
-   create→delete). Chưa làm vì fragile; ghi nhận ở đây.
+4. **Rollback compensation (phương án C) — ĐÃ LÀM, chạy trên MỌI target**:
+   - Khi vào trang có form, snapshot **giá trị gốc** của mọi form (bỏ field password).
+   - Khi submit form create/edit, ghi `RollbackAction`: **update** → lưu giá trị gốc để
+     re-submit; **create** → ghi lại để xóa thủ công/reset.
+   - **Run rollback**: login admin → với mỗi **update** re-POST giá trị gốc (khôi phục bản
+     ghi, form-urlencoded, cookie phiên); **create** → báo cần xóa tay/hoặc reset; nếu có
+     reset endpoint thì gọi luôn (phủ cả create).
+   - Xuất **`rollback-plan.json`** (redact secret) để review trước khi chạy.
+   - **Giới hạn trung thực**: edit khôi phục được tổng quát; **create black-box không tự xóa
+     an toàn** (không chắc id bản ghi mới) → cần reset endpoint hoặc xóa tay. Password không
+     được re-submit (giữ nguyên mật khẩu hiện có).
 
 ## 4. Nguyên tắc an toàn khi restore
 - Restore là hành động **có chủ đích của người dùng** (opt-in), không bật mặc định.

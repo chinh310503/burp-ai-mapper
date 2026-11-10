@@ -107,6 +107,14 @@ Crawl có thể tạo/sửa dữ liệu (xem `mutations.json`). Mục **Safety �
 - Bước restore tự **đăng nhập admin bằng code** (bước bảo trì tất định, tách khỏi login AI khi crawl) rồi gọi request với cookie phiên. Log `[restore] POST … -> 200`.
 - Reset endpoint thường admin-only. Nếu app **không có** reset endpoint → đừng crawl ghi trên production; dùng DB snapshot hoặc môi trường throwaway.
 
+### Rollback compensation (chạy trên MỌI target, không cần reset endpoint)
+
+Phương pháp black-box tổng quát: agent **snapshot giá trị gốc** của form khi vào trang, và khi submit create/edit thì ghi lại cách hoàn tác.
+
+- Bấm **"Run rollback"**: login admin → mỗi **edit** được khôi phục bằng cách **gửi lại giá trị gốc** (re-POST), mỗi **create** được báo để xóa tay / dùng reset endpoint; nếu có `Restore request` thì gọi luôn (phủ cả create).
+- Export sinh **`rollback-plan.json`** (redact secret) để review trước khi chạy.
+- Giới hạn: edit khôi phục tổng quát; **create** black-box không tự xóa an toàn (không chắc id mới) → cần reset endpoint hoặc xóa tay. Mật khẩu không bị re-submit (giữ nguyên).
+
 ## Bảo mật / phạm vi
 
 - Chỉ chạy trên hệ thống **bạn sở hữu hoặc được phép test**.

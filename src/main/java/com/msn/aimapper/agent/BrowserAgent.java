@@ -1,5 +1,6 @@
 package com.msn.aimapper.agent;
 
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -193,6 +194,51 @@ public class BrowserAgent {
             } catch (e) {}
             return true;""";
 
+    /**
+     * Serialize every form's {action, method, fields} (password fields OMITTED).
+     * Used on page load to snapshot the ORIGINAL values so an edit can be reversed
+     * on any target by re-submitting them (black-box compensation / rollback).
+     */
+    private static final String FORMS_ALL_JS = """
+            const out = [];
+            document.querySelectorAll('form').forEach(f => {
+              const fields = {};
+              Array.from(f.elements).forEach(el => {
+                const t = (el.type || '').toLowerCase();
+                if (el.name && t !== 'submit' && t !== 'button' && t !== 'file' && t !== 'password') {
+                  if (t === 'checkbox' || t === 'radio') { if (el.checked) fields[el.name] = el.value || 'on'; }
+                  else fields[el.name] = el.value == null ? '' : el.value;
+                }
+              });
+              out.push({action: f.getAttribute('action') || location.pathname,
+                        method: (f.getAttribute('method') || 'post').toUpperCase(), fields: fields});
+            });
+            return JSON.stringify(out);""";
+
+    /** The single most-filled data form (the one being submitted), same shape. */
+    private static final String FORM_BEST_JS = """
+            let best = null, bestScore = -1;
+            document.querySelectorAll('form').forEach(f => {
+              let score = 0; const fields = {};
+              Array.from(f.elements).forEach(el => {
+                const t = (el.type || '').toLowerCase();
+                if (el.name && t !== 'submit' && t !== 'button' && t !== 'file' && t !== 'password') {
+                  const v = el.value == null ? '' : el.value; fields[el.name] = v; if (v) score++;
+                }
+              });
+              if (score > bestScore) { bestScore = score;
+                best = {action: f.getAttribute('action') || location.pathname,
+                        method: (f.getAttribute('method') || 'post').toUpperCase(), fields: fields}; }
+            });
+            return JSON.stringify(best);""";
+
+    /** POST a form-urlencoded body (used to replay original values when rolling back). */
+    private static final String POST_FORM_JS =
+            "const cb = arguments[arguments.length - 1];"
+            + "fetch(arguments[0],{method:'POST',credentials:'include',"
+            + "headers:{'Content-Type':'application/x-www-form-urlencoded'},body:arguments[1]})"
+            + ".then(x => cb(x.status)).catch(e => cb('ERR:' + e));";
+
     /** Async fetch of a URL's text (used to seed from sitemap.xml / robots.txt). */
     private static final String FETCH_TEXT_JS =
             "const cb = arguments[arguments.length - 1];"
@@ -248,6 +294,24 @@ public class BrowserAgent {
     // audit line when it submits (create/edit). Cleared on navigation.
     private final java.util.LinkedHashMap<String, String> formData = new java.util.LinkedHashMap<>();
     private volatile String formPage;
+    // Rollback: original form values captured on page load (per form action URL), and
+    // the recorded compensating actions (re-submit originals for edits; note creates).
+    private final java.util.Map<String, java.util.LinkedHashMap<String, String>> formBefore =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.List<RollbackAction> rollback =
+            java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
+    /** One compensating action to undo a data change. */
+    public record RollbackAction(String kind, String method, String url,
+                                 java.util.LinkedHashMap<String, String> fields) {
+    }
+
+    /** Snapshot of the recorded rollback plan. */
+    public java.util.List<RollbackAction> rollbackPlan() {
+        synchronized (rollback) {
+            return new java.util.ArrayList<>(rollback);
+        }
+    }
     /** The account the current pass must log in as (null = prompt-driven single pass). */
     private volatile Account activeAccount;
     /**
@@ -426,6 +490,7 @@ public class BrowserAgent {
                     formPage = null;
                     waitForReady(400);   // let async (AJAX) content load before harvesting
                     exhaustPage();       // scroll + click "load more" to surface appended links
+                    snapshotForms(url);  // record ORIGINAL form values for possible rollback
                 }
 
                 // Discover in-scope links on this page; enqueue unvisited ones, but
@@ -634,6 +699,218 @@ public class BrowserAgent {
                 }
             }
             driver = null;
+        }
+    }
+
+    // --- rollback (black-box compensation: works on any target) --------------
+
+    /** On page load, remember each form's ORIGINAL field values (for undoing edits). */
+    private void snapshotForms(String pageUrl) {
+        try {
+            Object r = ((JavascriptExecutor) driver).executeScript(FORMS_ALL_JS);
+            if (r == null) {
+                return;
+            }
+            JsonArray arr = JsonParser.parseString(r.toString()).getAsJsonArray();
+            for (int i = 0; i < arr.size(); i++) {
+                JsonObject f = arr.get(i).getAsJsonObject();
+                String action = resolveUrl(getStr(f, "action", ""), pageUrl);
+                if (action.isBlank()) {
+                    continue;
+                }
+                formBefore.putIfAbsent(action, toMap(
+                        f.has("fields") ? f.getAsJsonObject("fields") : null)); // earliest = original
+            }
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    /** When a create/edit form is submitted, record how to undo it. */
+    private void recordRollback(String pageUrl) {
+        try {
+            Object r = ((JavascriptExecutor) driver).executeScript(FORM_BEST_JS);
+            if (r == null || "null".equals(r.toString())) {
+                return;
+            }
+            JsonObject f = JsonParser.parseString(r.toString()).getAsJsonObject();
+            String action = resolveUrl(getStr(f, "action", ""), pageUrl);
+            java.util.LinkedHashMap<String, String> after =
+                    toMap(f.has("fields") ? f.getAsJsonObject("fields") : null);
+            String kind = classifyKind(action, pageUrl);
+            if (kind.equals("update")) {
+                java.util.LinkedHashMap<String, String> originals = formBefore.get(action);
+                if (originals == null) {
+                    originals = formBefore.get(resolveUrl("", pageUrl));
+                }
+                if (originals != null && !originals.isEmpty()) {
+                    rollback.add(new RollbackAction("update", "POST", action, originals));
+                    log.accept("[agent] ROLLBACK recorded: UPDATE on " + action
+                            + " can be restored by re-submitting its original values.");
+                } else {
+                    rollback.add(new RollbackAction("update-unknown", "POST", action, after));
+                    log.accept("[agent] ROLLBACK: UPDATE on " + action
+                            + " - original values were not captured; restore manually.");
+                }
+            } else if (kind.equals("create")) {
+                rollback.add(new RollbackAction("create", "POST", action, after));
+                log.accept("[agent] ROLLBACK: CREATE on " + action
+                        + " - delete the new record or use a reset endpoint (cannot auto-delete safely).");
+            }
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private static String classifyKind(String action, String pageUrl) {
+        String s = ((action == null ? "" : action) + " " + (pageUrl == null ? "" : pageUrl)).toLowerCase();
+        if (s.contains("/new") || s.contains("/create") || s.contains("/register")
+                || s.contains("/signup") || s.contains("/sign-up")) {
+            return "create";
+        }
+        if (s.contains("/edit") || s.contains("/update")) {
+            return "update";
+        }
+        return "";
+    }
+
+    private static String resolveUrl(String ref, String base) {
+        if (base == null) {
+            return ref == null ? "" : ref;
+        }
+        if (ref == null || ref.isBlank()) {
+            return base;
+        }
+        try {
+            return new URI(base).resolve(ref).toString();
+        } catch (Exception e) {
+            return ref;
+        }
+    }
+
+    private static java.util.LinkedHashMap<String, String> toMap(JsonObject o) {
+        java.util.LinkedHashMap<String, String> m = new java.util.LinkedHashMap<>();
+        if (o != null) {
+            for (var e : o.entrySet()) {
+                try {
+                    m.put(e.getKey(), e.getValue().getAsString());
+                } catch (RuntimeException ignored) {
+                }
+            }
+        }
+        return m;
+    }
+
+    /** The recorded rollback plan as redacted pretty JSON (for rollback-plan.json). */
+    public String rollbackPlanJson() {
+        JsonArray arr = new JsonArray();
+        for (RollbackAction a : rollbackPlan()) {
+            JsonObject o = new JsonObject();
+            o.addProperty("kind", a.kind());
+            o.addProperty("method", a.method());
+            o.addProperty("url", com.msn.aimapper.export.Redactor.redactUrl(a.url()));
+            JsonObject fields = new JsonObject();
+            for (var e : a.fields().entrySet()) {
+                boolean secret = com.msn.aimapper.export.Redactor.isSecretName(e.getKey());
+                fields.addProperty(e.getKey(), secret ? "REDACTED" : e.getValue());
+            }
+            o.add("fields", fields);
+            if (a.kind().startsWith("create")) {
+                o.addProperty("note", "A record was created; delete it or run the reset endpoint "
+                        + "(auto-rollback does not delete, to avoid data loss).");
+            } else if (a.kind().equals("update-unknown")) {
+                o.addProperty("note", "Original values were not captured; restore manually.");
+            } else {
+                o.addProperty("note", "Run rollback re-POSTs these original values to restore the record.");
+            }
+            arr.add(o);
+        }
+        return new GsonBuilder().setPrettyPrinting().create().toJson(arr);
+    }
+
+    /**
+     * Execute the rollback plan on ANY target: log in as admin, then for each recorded
+     * UPDATE re-submit its original field values (restoring the record). CREATEs are
+     * reported for manual handling (a black-box crawler can't safely pick the right
+     * delete). If a reset endpoint is also configured it is fired afterwards (covers
+     * creates). Run from a background thread.
+     */
+    public void runRollback(AgentConfig cfg) {
+        java.util.List<RollbackAction> plan = rollbackPlan();
+        if (plan.isEmpty() && cfg.restoreRequest.isBlank()) {
+            log.accept("[rollback] Nothing recorded to roll back.");
+            return;
+        }
+        String origin = originOf(cfg.targetUrl);
+        ChromeDriver d = null;
+        try {
+            d = newDriver(cfg);
+            d.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(30));
+            d.manage().timeouts().scriptTimeout(Duration.ofSeconds(20));
+            d.get(cfg.targetUrl);
+            Account admin = pickAdmin(parseAccounts(cfg.prompt));
+            if (admin != null) {
+                log.accept("[rollback] Logging in as '" + admin.display() + "' before rollback.");
+                codeLoginForRestore(d, admin, origin);
+            }
+            int restored = 0;
+            int manual = 0;
+            for (int i = plan.size() - 1; i >= 0; i--) { // reverse order
+                RollbackAction a = plan.get(i);
+                if ("update".equals(a.kind())) {
+                    try {
+                        Object r = ((JavascriptExecutor) d).executeAsyncScript(
+                                POST_FORM_JS, a.url(), formUrlEncode(a.fields()));
+                        log.accept("[rollback] restored UPDATE " + a.url() + " -> " + r);
+                        restored++;
+                    } catch (RuntimeException e) {
+                        log.accept("[rollback] UPDATE " + a.url() + " failed: " + shortMsg(e));
+                    }
+                } else {
+                    manual++;
+                    log.accept("[rollback] MANUAL (" + a.kind() + ") " + a.url()
+                            + " - delete the created record or use the reset endpoint.");
+                }
+            }
+            RestoreSpec spec = parseRestore(cfg.restoreRequest);
+            if (spec != null) {
+                String url = spec.url().toLowerCase().startsWith("http") ? spec.url()
+                        : (origin == null ? spec.url()
+                           : origin + (spec.url().startsWith("/") ? spec.url() : "/" + spec.url()));
+                Object r = ((JavascriptExecutor) d).executeAsyncScript(
+                        "const cb=arguments[arguments.length-1];"
+                        + "fetch(arguments[0],{method:arguments[1],credentials:'include'})"
+                        + ".then(x=>cb(x.status)).catch(e=>cb('ERR:'+e));", url, spec.method());
+                log.accept("[rollback] reset " + spec.method() + " " + url + " -> " + r);
+            }
+            log.accept("[rollback] Done: " + restored + " update(s) restored, "
+                    + manual + " create(s) need manual delete / reset.");
+        } catch (RuntimeException e) {
+            log.accept("[rollback] FAILED: " + shortMsg(e));
+        } finally {
+            if (d != null) {
+                try {
+                    d.quit();
+                } catch (RuntimeException ignored) {
+                }
+            }
+        }
+    }
+
+    private static String formUrlEncode(java.util.Map<String, String> m) {
+        StringBuilder sb = new StringBuilder();
+        for (var e : m.entrySet()) {
+            if (sb.length() > 0) {
+                sb.append('&');
+            }
+            sb.append(enc(e.getKey())).append('=').append(enc(e.getValue()));
+        }
+        return sb.toString();
+    }
+
+    private static String enc(String s) {
+        try {
+            return java.net.URLEncoder.encode(s == null ? "" : s, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (RuntimeException e) {
+            return "";
         }
     }
 
@@ -1517,6 +1794,7 @@ public class BrowserAgent {
                 log.accept("[agent] DATA CHANGE: submitted form on " + page
                         + (label.isBlank() ? "" : " [" + trunc(label, 40) + "]")
                         + (formData.isEmpty() ? "" : " fields=" + formData));
+                recordRollback(url);  // record how to undo this create/edit
             }
             formData.clear();
             formPage = null;
