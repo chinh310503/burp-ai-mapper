@@ -50,6 +50,8 @@ Kết quả trong Output dir:
 - `endpoints.json` — **danh sách API đã khử trùng**, theo `method + shape` (GET `/products/{id}` khác DELETE `/products/{id}`), kèm `count` + `examples`.
 - `openapi.json` — OpenAPI 3.1 (gom `/users/123` → `/users/{id}`; suy luận **schema JSON đệ quy** cho request + **response body**, gộp nhiều mẫu với `required`/`nullable`; **security scheme** cookie/bearer quan sát được; **tags** theo segment path đầu).
 
+- `js-endpoints.json` — **endpoint trích TĨNH từ JS + inline HTML** mà Burp đã bắt (không gửi thêm request nào — chỉ đọc body có sẵn, nên **read-only tuyệt đối**). Bắt được các API path **tồn tại trong code nhưng có thể chưa bao giờ bị gọi** lúc crawl — đúng thứ pentester dễ bỏ sót nhất. Mỗi mục có cờ **`observed`**: `false` nghĩa là shape endpoint đó **chưa** xuất hiện trong traffic proxy (gap thực sự). Các URL này cũng được gộp vào `sitemap.xml`/`urls.json` với `"source":"js-static"`. (Regex kiểu LinkFinder/jsluice: endpoint dựng động bằng nối chuỗi chỉ bắt được một phần; template literal `` `/users/${id}` `` được chuẩn hoá thành `/users/{id}`.)
+
 - `mutations.json` — **nhật ký audit dữ liệu đã thêm/sửa**: mọi request **không phải GET** agent thực sự gửi (POST/PUT/PATCH/DELETE có response) kèm **body đã gửi**, phân loại `create`/`update`/`delete`, redact secret. Dùng để rà soát — hoặc hoàn tác — những gì bị tạo/sửa trong lúc crawl (phòng phá hoại dữ liệu). Agent cũng ghi realtime dòng `DATA CHANGE: submitted form on … fields={…}` vào log khi submit form.
 
 **Redact secret:** mọi bản xuất tự che giá trị nhạy cảm (password/token/api key/session/signature…) trong URL và body example — an toàn để chia sẻ.
@@ -139,7 +141,9 @@ burp-ai-mapper/
 │  └─ export/
 │     ├─ SiteMapExtractor.java      # đọc & lọc Burp site map
 │     ├─ PathTemplater.java         # /123 → /{id}
-│     ├─ SitemapGenerator.java      # sitemap.xml + urls.json
+│     ├─ JsEndpointExtractor.java   # trích endpoint tĩnh từ JS/HTML (read-only)
+│     ├─ Redactor.java              # che secret trong URL/body khi xuất
+│     ├─ SitemapGenerator.java      # sitemap.xml + urls.json + endpoints.json + js-endpoints.json
 │     └─ OpenApiGenerator.java      # openapi.json (3.1)
 └─ src/main/resources/META-INF/services/burp.api.montoya.BurpExtension
 ```

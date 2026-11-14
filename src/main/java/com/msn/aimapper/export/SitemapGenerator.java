@@ -42,13 +42,72 @@ public final class SitemapGenerator {
      */
     public static void write(Iterable<HttpRequestResponse> records, Path outDir,
                              java.util.Collection<String> extraGetUrls) throws IOException {
+        write(records, outDir, extraGetUrls, java.util.Collections.emptyList());
+    }
+
+    /**
+     * @param extraGetUrls  client-only GET routes the crawler reached (see above)
+     * @param jsStaticUrls  endpoint URLs extracted STATICALLY from captured JS / inline
+     *                      HTML (never requested - candidates that exist in the app's
+     *                      code but may never have been exercised). Merged into
+     *                      sitemap.xml and urls.json tagged {@code source:"js-static"},
+     *                      and listed with an {@code observed} gap flag in
+     *                      {@code js-endpoints.json}.
+     */
+    public static void write(Iterable<HttpRequestResponse> records, Path outDir,
+                             java.util.Collection<String> extraGetUrls,
+                             java.util.Collection<String> jsStaticUrls) throws IOException {
         Files.createDirectories(outDir);
         java.util.Collection<String> extra =
                 extraGetUrls == null ? java.util.Collections.emptyList() : extraGetUrls;
-        writeXml(records, extra, outDir.resolve("sitemap.xml"));
-        writeJson(records, extra, outDir.resolve("urls.json"));
+        java.util.Collection<String> js =
+                jsStaticUrls == null ? java.util.Collections.emptyList() : jsStaticUrls;
+        // sitemap.xml lists every GET-able location, so both client routes and the
+        // static JS candidates are included there.
+        java.util.List<String> allExtraLocs = new java.util.ArrayList<>(extra);
+        allExtraLocs.addAll(js);
+        writeXml(records, allExtraLocs, outDir.resolve("sitemap.xml"));
+        writeJson(records, extra, js, outDir.resolve("urls.json"));
         writeEndpoints(records, outDir.resolve("endpoints.json"));
         writeMutations(records, outDir.resolve("mutations.json"));
+        writeJsEndpoints(records, js, outDir.resolve("js-endpoints.json"));
+    }
+
+    /**
+     * Static-JS endpoint candidates with a coverage gap flag: {@code observed} is true
+     * when the same endpoint SHAPE (method-agnostic) actually appeared in captured
+     * proxy traffic. {@code observed:false} means the endpoint exists in the app's code
+     * but was never exercised during the crawl - the highest-signal "did the pentester
+     * even touch this?" list. Secrets in URLs are redacted.
+     */
+    private static void writeJsEndpoints(Iterable<HttpRequestResponse> records,
+                                         java.util.Collection<String> jsUrls, Path file)
+            throws IOException {
+        java.util.Set<String> observedShapes = new java.util.HashSet<>();
+        for (HttpRequestResponse rr : records) {
+            HttpRequest req = rr.request();
+            if (req != null) {
+                observedShapes.add(PathTemplater.signature(req.url()));
+            }
+        }
+        JsonArray arr = new JsonArray();
+        TreeSet<String> sorted = new TreeSet<>();
+        for (String u : jsUrls) {
+            if (u != null && !u.isBlank()) {
+                sorted.add(u);
+            }
+        }
+        for (String u : sorted) {
+            JsonObject o = new JsonObject();
+            o.addProperty("url", Redactor.redactUrl(u));
+            String shape = PathTemplater.signature(u);
+            o.addProperty("shape", Redactor.redactUrl(shape));
+            o.addProperty("observed", observedShapes.contains(shape));
+            o.addProperty("source", "js-static");
+            arr.add(o);
+        }
+        String json = new GsonBuilder().setPrettyPrinting().create().toJson(arr);
+        Files.write(file, json.getBytes(StandardCharsets.UTF_8));
     }
 
     /**
@@ -199,6 +258,7 @@ public final class SitemapGenerator {
 
     private static void writeJson(Iterable<HttpRequestResponse> records,
                                   java.util.Collection<String> extraGetUrls,
+                                  java.util.Collection<String> jsStaticUrls,
                                   Path file) throws IOException {
         // De-duplicate by METHOD + URL, keeping the first response seen.
         Map<String, JsonObject> unique = new LinkedHashMap<>();
@@ -234,6 +294,24 @@ public final class SitemapGenerator {
             o.addProperty("status", 0);
             o.addProperty("contentType", "");
             o.addProperty("source", "crawler-client-route");
+            unique.put(key, o);
+        }
+        // Endpoints extracted statically from JS / inline HTML (never requested). Added
+        // only if not already observed, and tagged so they can be filtered out.
+        for (String u : jsStaticUrls) {
+            if (u == null || u.isBlank()) {
+                continue;
+            }
+            String key = "GET " + u;
+            if (unique.containsKey(key)) {
+                continue;
+            }
+            JsonObject o = new JsonObject();
+            o.addProperty("method", "GET");
+            o.addProperty("url", Redactor.redactUrl(u));
+            o.addProperty("status", 0);
+            o.addProperty("contentType", "");
+            o.addProperty("source", "js-static");
             unique.put(key, o);
         }
         JsonArray arr = new JsonArray();

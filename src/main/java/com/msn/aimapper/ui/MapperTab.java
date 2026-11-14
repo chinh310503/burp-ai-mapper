@@ -333,13 +333,23 @@ public class MapperTab {
             // Client-only routes the agent reached but the proxy never saw (hash / SPA
             // pushState pages), filtered by the same host/scope rules as the records.
             List<String> extra = filterClientUrls(agent.discoveredUrls());
-            SitemapGenerator.write(recs, outDir, extra);
+            // Static (read-only) endpoints mined from captured JS / inline HTML - API
+            // paths that exist in the code but may never have been exercised. Scoped to
+            // the target host, then run through the same host/scope filter as the rest.
+            String jsHost = hostOf(targetUrl.getText().trim());
+            if (jsHost == null || jsHost.isBlank()) {
+                jsHost = effectiveHostFilter();
+            }
+            List<String> jsStatic = filterClientUrls(
+                    com.msn.aimapper.export.JsEndpointExtractor.extract(recs, jsHost));
+            SitemapGenerator.write(recs, outDir, extra, jsStatic);
             // Rollback plan: how to undo recorded edits/creates (any target).
             String plan = agent.rollbackPlanJson();
             java.nio.file.Files.writeString(outDir.resolve("rollback-plan.json"), plan);
-            log("[export] Wrote sitemap.xml, urls.json, endpoints.json, mutations.json and "
-                    + "rollback-plan.json (" + recs.size() + " proxy records + "
-                    + extra.size() + " client-only URLs) to " + outDir);
+            log("[export] Wrote sitemap.xml, urls.json, endpoints.json, mutations.json, "
+                    + "js-endpoints.json and rollback-plan.json (" + recs.size()
+                    + " proxy records + " + extra.size() + " client-only URLs + "
+                    + jsStatic.size() + " static-JS endpoints) to " + outDir);
         });
     }
 
