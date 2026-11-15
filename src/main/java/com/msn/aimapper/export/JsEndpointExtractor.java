@@ -130,7 +130,8 @@ public final class JsEndpointExtractor {
         if (raw == null) {
             return null;
         }
-        String cand = TEMPLATE_VAR.matcher(raw.trim()).replaceAll("{id}");
+        String cand = htmlDecode(raw.trim());
+        cand = TEMPLATE_VAR.matcher(cand).replaceAll("{id}");
         if (!looksLikeEndpoint(cand)) {
             return null;
         }
@@ -193,6 +194,22 @@ public final class JsEndpointExtractor {
             return false;
         }
         return true;
+    }
+
+    /**
+     * Decode the HTML entities that appear when a URL is read out of HTML attribute text
+     * (e.g. {@code &amp;} in an {@code href}). Without this, candidates come out as
+     * {@code /products?page=1&amp;category=books} and template to junk shapes.
+     */
+    private static String htmlDecode(String s) {
+        if (s == null || s.indexOf('&') < 0) {
+            return s;
+        }
+        return s.replace("&amp;", "&").replace("&#38;", "&").replace("&#x26;", "&")
+                .replace("&#x2F;", "/").replace("&#47;", "/")
+                .replace("&quot;", "\"").replace("&#34;", "\"")
+                .replace("&apos;", "'").replace("&#39;", "'")
+                .replace("&lt;", "<").replace("&gt;", ">");
     }
 
     private static String contentType(HttpResponse resp) {

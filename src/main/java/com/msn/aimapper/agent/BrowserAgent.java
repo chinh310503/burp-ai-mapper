@@ -114,6 +114,9 @@ public class BrowserAgent {
     private static final int STUCK_LIMIT = 4;
     /** Stop only when the frontier is empty AND no progress for this many steps. */
     private static final int DONE_STABLE = 5;
+    /** After this many consecutive steps still stuck on a login page, tell the model to
+     *  stop retrying the login and explore other pages instead. */
+    private static final int LOGIN_RETRY_LIMIT = 6;
     /** Safety cap on how many URLs we keep queued. */
     private static final int MAX_FRONTIER = 2000;
     /**
@@ -286,7 +289,9 @@ public class BrowserAgent {
     private final Consumer<String> log;
     private final CoverageSource coverage;   // live proxy coverage (may be null)
     private volatile boolean stop;
+    private volatile boolean running;         // true while a crawl run() is executing
     private volatile ChromeDriver driver;
+    private volatile boolean passLoggedIn;    // did the code login succeed for the current pass
     private volatile String targetHostField; // host of the current run, for coverage lookup
     private volatile int samplesPerTemplate = SAMPLES_PER_TEMPLATE; // from cfg at run start
     private volatile boolean visionNoted;     // log vision-fallback use only once
@@ -394,6 +399,11 @@ public class BrowserAgent {
         this.coverage = coverage;
     }
 
+    /** True while a crawl is in progress (used to refuse a second concurrent Start). */
+    public boolean isRunning() {
+        return running;
+    }
+
     public void stop() {
         stop = true;
         ChromeDriver d = driver;
@@ -407,13 +417,22 @@ public class BrowserAgent {
 
     /** Runs the full exploration loop. Blocking: call from a background thread. */
     public void run(AgentConfig cfg, LlmClient llm) {
+        if (running) {
+            log.accept("[agent] A crawl is already running - ignoring this Start. Click Stop "
+                    + "and wait for it to finish before starting again (two runs would share "
+                    + "one browser and corrupt each other).");
+            return;
+        }
+        running = true;
         stop = false;
         try {
             driver = newDriver(cfg);
             log.accept("[agent] Chrome started; proxy -> " + cfg.proxyEndpoint()
                     + " (insecure certs accepted so Burp's CA works).");
             driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(30));
-            driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(2));
+            // No implicit wait: we use explicit waitForReady + JS, and a 2s implicit wait
+            // made every stale-index lookup / empty findElements block for a full 2s.
+            driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(0));
             driver.manage().timeouts().scriptTimeout(Duration.ofSeconds(15)); // for async fetch seeds
 
             String targetHost = hostOf(cfg.targetUrl);
@@ -451,8 +470,12 @@ public class BrowserAgent {
             int totalVisited = 0;
             int totalBlocked = 0;
             for (int pass = 0; pass < passes.size() && !stop; pass++) {
+            if (driver == null) {
+                break; // browser gone (e.g. a second crawl was started) -> stop cleanly
+            }
             Account acct = passes.get(pass);
             activeAccount = acct;
+            passLoggedIn = false;
             if (pass > 0) {
                 log.accept("[agent] Switching session to account '" + acct.display()
                         + "' (clearing cookies then re-authenticating in code - "
@@ -466,6 +489,24 @@ public class BrowserAgent {
                     + (acct != null ? "  (account: " + acct.display() + ")" : ""));
             gotoUrl(cfg.targetUrl);
 
+            // Deterministic code login for THIS account, so every privilege tier reliably
+            // signs in (LLM typing into element indices is flaky). A tier that cannot log
+            // in cannot have its account-specific features crawled, so we say so loudly
+            // rather than silently missing them.
+            if (acct != null) {
+                log.accept("[agent] Logging in as '" + acct.display()
+                        + "' (deterministic code login) before exploring...");
+                passLoggedIn = codeLogin(driver, acct, originOf(cfg.targetUrl));
+                if (passLoggedIn) {
+                    log.accept("[agent] Logged in as '" + acct.display() + "'.");
+                    gotoUrl(cfg.targetUrl); // land on an authenticated page before exploring
+                } else {
+                    log.accept("[agent] WARNING: could NOT log in as '" + acct.display()
+                            + "'. Its account-specific features will NOT be crawled - check "
+                            + "this account's credentials in the Task prompt.");
+                }
+            }
+
             Set<String> visited = new LinkedHashSet<>();            // URLs navigated to
             Set<String> done = new LinkedHashSet<>();               // action signatures
             LinkedHashSet<String> frontier = new LinkedHashSet<>(); // in-scope URLs discovered, unvisited
@@ -473,12 +514,25 @@ public class BrowserAgent {
             Deque<String> recent = new ArrayDeque<>();
             int noProgress = 0;                                     // steps without anything new
             int blocked = 0;                                        // destructive actions blocked
+            int loginStreak = 0;                                    // consecutive steps stuck on a login page
             boolean completed = false;                              // true if the pass finished naturally
 
             seedFromSiteFiles(cfg, targetHost, frontier, shapeSeen, extraBlock);
 
             for (int step = 1; step <= stepCap && !stop; step++) {
-                String url = normalizeUrl(safe(() -> driver.getCurrentUrl(), cfg.targetUrl));
+                if (driver == null) {
+                    log.accept("[agent] Browser is no longer available -> stopping this run "
+                            + "(did a second crawl start while this one was running?).");
+                    break;
+                }
+                String url;
+                try {
+                    url = normalizeUrl(driver.getCurrentUrl());
+                } catch (RuntimeException e) {
+                    log.accept("[agent] Browser session lost (" + shortMsg(e)
+                            + ") -> stopping this run.");
+                    break;
+                }
                 String title = safe(() -> driver.getTitle(), "");
                 boolean newUrl = visited.add(url);
                 frontier.remove(url);
@@ -523,7 +577,18 @@ public class BrowserAgent {
                 String state = buildStatePrompt(cfg, url, title, elementsJson, visited, done,
                         frontier, recent, step);
 
+                // If we keep landing on a login page, don't let the model burn expensive
+                // steps re-submitting forever: after a few tries, steer it to explore.
+                boolean onLoginPage = loginHint(elems) != null;
+                loginStreak = onLoginPage ? loginStreak + 1 : 0;
+                if (acct != null && loginStreak > LOGIN_RETRY_LIMIT) {
+                    state += "\n\nNOTE: Login has not succeeded after several attempts. STOP "
+                            + "retrying the login now. Instead pick an UNVISITED link from the "
+                            + "list and continue exploring the pages this account can reach.";
+                }
+
                 String reply;
+                long llmStart = System.currentTimeMillis();
                 try {
                     if (cfg.vision && elems.isEmpty()) {
                         // Vision fallback: no interactive elements to index -> let a
@@ -545,6 +610,11 @@ public class BrowserAgent {
                 } catch (Exception e) {
                     log.accept("[agent] LLM error: " + e.getMessage() + " -- stopping.");
                     break;
+                }
+                long llmMs = System.currentTimeMillis() - llmStart;
+                if (llmMs > 15000) {
+                    log.accept("[agent] (the AI model took " + (llmMs / 1000)
+                            + "s to respond - a slow/rate-limited endpoint slows every step)");
                 }
 
                 JsonObject action = parseAction(reply);
@@ -694,6 +764,7 @@ public class BrowserAgent {
                 }
             }
             driver = null;
+            running = false;
         }
     }
 
@@ -919,6 +990,68 @@ public class BrowserAgent {
         return accounts.isEmpty() ? null : accounts.get(0);
     }
 
+    /**
+     * Deterministic code login for a crawl pass: fill the username + password fields and
+     * submit, retrying a few times, then verify. Returns true if we end up logged in
+     * (left the login page and no password field remains). This makes every account
+     * actually sign in so its tier-specific features get crawled, instead of relying on
+     * the LLM typing into element indices.
+     */
+    private boolean codeLogin(ChromeDriver d, Account acct, String origin) {
+        for (int attempt = 1; attempt <= 3 && !stop; attempt++) {
+            try {
+                WebElement pw = firstShown(d.findElements(By.cssSelector("input[type=password]")));
+                if (pw == null && origin != null) {
+                    try {
+                        d.get(origin + "/login");
+                        waitReady(d);
+                    } catch (RuntimeException ignored) {
+                    }
+                    pw = firstShown(d.findElements(By.cssSelector("input[type=password]")));
+                }
+                if (pw == null) {
+                    return isLoggedIn(d); // no login form in sight; maybe already signed in
+                }
+                WebElement user = firstShown(d.findElements(By.cssSelector(
+                        "input[type=email],input[name*=user i],input[name*=email i],"
+                        + "input[name*=login i],input[type=text]")));
+                if (user != null) {
+                    try {
+                        user.clear();
+                    } catch (RuntimeException ignored) {
+                    }
+                    user.sendKeys(acct.username());
+                }
+                try {
+                    pw.clear();
+                } catch (RuntimeException ignored) {
+                }
+                pw.sendKeys(acct.password());
+                pw.sendKeys(Keys.RETURN);
+                waitReady(d);
+                sleep(600);
+                if (isLoggedIn(d)) {
+                    return true;
+                }
+            } catch (RuntimeException e) {
+                log.accept("[agent] login attempt " + attempt + " failed: " + shortMsg(e));
+            }
+        }
+        return isLoggedIn(d);
+    }
+
+    /** Heuristic: logged in when not on a login page and no visible password field remains. */
+    private boolean isLoggedIn(ChromeDriver d) {
+        try {
+            String u = d.getCurrentUrl();
+            boolean onLogin = u != null && u.toLowerCase().contains("/login");
+            boolean hasPw = firstShown(d.findElements(By.cssSelector("input[type=password]"))) != null;
+            return !onLogin && !hasPw;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     /** Minimal deterministic login for the rollback step only (not the crawl). */
     private void codeLoginForRestore(ChromeDriver d, Account acct, String origin) {
         try {
@@ -1038,11 +1171,18 @@ public class BrowserAgent {
             if (acct.label() != null && !acct.label().isBlank()) {
                 sb.append("  (").append(acct.label()).append(')');
             }
-            sb.append('\n')
-                    .append("You are in a FRESH session. If you are not yet logged in as THIS exact "
-                            + "account, find the login form and submit these credentials FIRST, then "
-                            + "explore everything this account can reach. Ignore the other accounts "
-                            + "listed in the TASK during this pass.\n\n");
+            sb.append('\n');
+            if (passLoggedIn) {
+                sb.append("You are ALREADY LOGGED IN as this account (signed in automatically). "
+                        + "Do NOT go to the login page or re-enter credentials. Just explore every "
+                        + "page and feature this account can reach. Ignore the other accounts in "
+                        + "the TASK during this pass.\n\n");
+            } else {
+                sb.append("You are in a FRESH session. If you are not yet logged in as THIS exact "
+                        + "account, find the login form and submit these credentials FIRST, then "
+                        + "explore everything this account can reach. Ignore the other accounts "
+                        + "listed in the TASK during this pass.\n\n");
+            }
         }
         String login = loginHint(parseElems(elementsJson));
         if (login != null) {

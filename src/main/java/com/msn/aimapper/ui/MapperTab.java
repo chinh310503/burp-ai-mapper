@@ -237,6 +237,11 @@ public class MapperTab {
     }
 
     private void onStart() {
+        if (agent.isRunning()) {
+            log("[ui] A crawl is already running. Click Stop and wait for it to finish "
+                    + "before starting again.");
+            return;
+        }
         AgentConfig cfg = buildConfig();
 
         if (cfg.targetUrl.isBlank() || cfg.targetUrl.equals("https://")) {

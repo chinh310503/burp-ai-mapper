@@ -65,7 +65,7 @@ public class LlmClient {
         this.jsonMode = jsonMode;
         this.maxAttempts = Math.max(1, maxAttempts);
         this.http = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(30))
+                .connectTimeout(Duration.ofSeconds(20))
                 .build();
     }
 
@@ -160,7 +160,7 @@ public class LlmClient {
         body.add("messages", arr);
         return HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/chat/completions"))
-                .timeout(Duration.ofSeconds(120))
+                .timeout(Duration.ofSeconds(45))
                 .header("Content-Type", "application/json")
                 .header("Authorization", "Bearer " + apiKey)
                 .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(body)))
