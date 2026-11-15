@@ -420,32 +420,18 @@ public class BrowserAgent {
             targetHostField = targetHost;
             samplesPerTemplate = cfg.samplesPerTemplate > 0
                     ? cfg.samplesPerTemplate : SAMPLES_PER_TEMPLATE;
-            Pattern extraBlock = compileExtra(cfg.extraBlockKeywords);
-            if (cfg.blockDestructive) {
-                log.accept("[agent] SAFETY: destructive actions (delete/logout/reset/"
-                        + "pay/...) are BLOCKED in code - the agent cannot delete data, "
-                        + "log out, or pay even if the model tries.");
-            } else {
-                log.accept("[agent] WARNING: destructive-action blocking is OFF - "
-                        + "the agent may delete data, log out or pay. Use only on a "
-                        + "throwaway test environment.");
-            }
+            Pattern extraBlock = null; // destructive blocking uses the built-in pattern only
+            log.accept("[agent] SAFETY: destructive actions (delete/logout/reset/"
+                    + "pay/...) are BLOCKED in code - the agent cannot delete data, "
+                    + "log out, or pay even if the model tries.");
 
-            // Step budget. Max steps = 0 means "crawl until complete": keep going until
-            // the frontier is drained (no unvisited links left) or the user clicks Stop,
-            // with only a high absolute ceiling as an infinite-loop guard. A positive
-            // value is a hard cap per pass.
-            boolean unlimited = cfg.maxSteps <= 0;
-            int stepCap = unlimited ? ABSOLUTE_MAX_STEPS : cfg.maxSteps;
-            String capDisp = unlimited ? "∞" : Integer.toString(cfg.maxSteps);
-            if (unlimited) {
-                log.accept("[agent] Max steps = 0 -> crawling UNTIL COMPLETE: stops only when "
-                        + "no unvisited links remain (or you click Stop). Safety ceiling "
-                        + ABSOLUTE_MAX_STEPS + " steps.");
-            } else {
-                log.accept("[agent] Step cap " + cfg.maxSteps + " per pass. Set Max steps = 0 "
-                        + "to crawl the whole sitemap until no links remain.");
-            }
+            // The crawl ALWAYS runs until complete: it stops only when the frontier is
+            // drained (no unvisited links left) or the user clicks Stop, with a high
+            // absolute ceiling as the only infinite-loop guard.
+            int stepCap = ABSOLUTE_MAX_STEPS;
+            String capDisp = "∞";
+            log.accept("[agent] Crawling UNTIL COMPLETE: stops only when no unvisited links "
+                    + "remain (or you click Stop). Safety ceiling " + ABSOLUTE_MAX_STEPS + " steps.");
 
             // Multi-account: if the TASK lists several accounts, crawl each in its
             // OWN session (one privilege tier per pass). Between passes we clear the
@@ -520,7 +506,7 @@ public class BrowserAgent {
                     // Never queue a destructive URL: this is what keeps the
                     // deterministic frontier jumps (below) from navigating into a
                     // /delete or /logout link without the LLM ever being asked.
-                    if (cfg.blockDestructive && isDestructiveUrl(n, extraBlock)) {
+                    if (isDestructiveUrl(n, extraBlock)) {
                         continue;
                     }
                     String shape = PathTemplater.signature(n);
@@ -631,8 +617,7 @@ public class BrowserAgent {
                     // Final hard gate: block destructive actions regardless of what
                     // the model decided. The signature is already in `done`, so it
                     // is listed under ALREADY DONE and won't be re-suggested as new.
-                    String blockReason = cfg.blockDestructive
-                            ? destructiveReason(act, type, elems, extraBlock) : null;
+                    String blockReason = destructiveReason(act, type, elems, extraBlock);
                     if (blockReason != null) {
                         blocked++;
                         log.accept("[agent] BLOCKED destructive " + type + " (" + blockReason
@@ -662,14 +647,8 @@ public class BrowserAgent {
                 sleep(900);
             }
             if (!completed && !stop) {
-                if (unlimited) {
-                    log.accept("[agent] Hit the safety ceiling " + ABSOLUTE_MAX_STEPS + " with "
-                            + frontier.size() + " link(s) still queued (unusually large site).");
-                } else {
-                    log.accept("[agent] Reached Max steps " + cfg.maxSteps + " with "
-                            + frontier.size() + " link(s) still queued -> raise Max steps, or set "
-                            + "it to 0 to crawl until the whole sitemap is covered.");
-                }
+                log.accept("[agent] Hit the safety ceiling " + ABSOLUTE_MAX_STEPS + " with "
+                        + frontier.size() + " link(s) still queued (unusually large site).");
             }
             log.accept("[agent] Pass " + (pass + 1) + "/" + passes.size()
                     + (acct != null ? " [" + acct.display() + "]" : "")
@@ -685,26 +664,21 @@ public class BrowserAgent {
                     + " destructive actions blocked. "
                     + "Switch to Burp and click 'Export sitemap' / 'Export OpenAPI'.");
 
-            // Automatic environment restore after the crawl (no button needed).
-            boolean doRollback = cfg.autoRollback && !stop && hasRecordedUpdates();
-            boolean doReset = cfg.restoreAfterCrawl && !stop && !cfg.restoreRequest.isBlank();
-            if (doRollback || doReset) {
+            // Automatic environment restore after the crawl (always on, no button):
+            // restore every edited record to its original values. Newly created records
+            // are left as-is (a black-box crawler can't safely delete them).
+            if (!stop && hasRecordedUpdates()) {
                 ChromeDriver crawlDriver = driver;
-                driver = null;   // hand the field off so stop() won't fight the restore driver
+                driver = null;   // hand the field off so stop() won't fight the rollback driver
                 if (crawlDriver != null) {
                     try {
                         crawlDriver.quit();
                     } catch (RuntimeException ignored) {
                     }
                 }
-                if (doRollback) {
-                    log.accept("[agent] Auto-rollback: restoring edited records to their "
-                            + "original values (newly created records are left as-is).");
-                    runRollback(cfg);   // also fires the reset endpoint if one is configured
-                } else {
-                    log.accept("[agent] Auto-restore enabled -> calling the reset endpoint.");
-                    restore(cfg);
-                }
+                log.accept("[agent] Auto-rollback: restoring edited records to their "
+                        + "original values (newly created records are left as-is).");
+                runRollback(cfg);
             }
         } catch (WebDriverException e) {
             log.accept("[agent] Browser error: " + e.getMessage()
@@ -757,13 +731,21 @@ public class BrowserAgent {
             String action = resolveUrl(getStr(f, "action", ""), pageUrl);
             java.util.LinkedHashMap<String, String> after =
                     toMap(f.has("fields") ? f.getAsJsonObject("fields") : null);
+            java.util.LinkedHashMap<String, String> originals = formBefore.get(action);
+            if (originals == null) {
+                originals = formBefore.get(resolveUrl("", pageUrl));
+            }
+            boolean hasOriginals = originals != null && !originals.isEmpty();
             String kind = classifyKind(action, pageUrl);
+            if (kind.isEmpty()) {
+                // No /edit|/create hint in the URL: a form that arrived PRE-FILLED is
+                // almost certainly editing an existing record (we captured its original
+                // values and can restore them); an empty form is a create. This recovers
+                // edits whose URL gives no hint, so more data can be rolled back.
+                kind = hasOriginals ? "update" : "create";
+            }
             if (kind.equals("update")) {
-                java.util.LinkedHashMap<String, String> originals = formBefore.get(action);
-                if (originals == null) {
-                    originals = formBefore.get(resolveUrl("", pageUrl));
-                }
-                if (originals != null && !originals.isEmpty()) {
+                if (hasOriginals) {
                     rollback.add(new RollbackAction("update", "POST", action, originals));
                     log.accept("[agent] ROLLBACK recorded: UPDATE on " + action
                             + " can be restored by re-submitting its original values.");
@@ -775,7 +757,7 @@ public class BrowserAgent {
             } else if (kind.equals("create")) {
                 rollback.add(new RollbackAction("create", "POST", action, after));
                 log.accept("[agent] ROLLBACK: CREATE on " + action
-                        + " - delete the new record or use a reset endpoint (cannot auto-delete safely).");
+                        + " - new record left as-is (black-box rollback cannot auto-delete safely).");
             }
         } catch (RuntimeException ignored) {
         }
@@ -835,7 +817,7 @@ public class BrowserAgent {
             }
             o.add("fields", fields);
             if (a.kind().startsWith("create")) {
-                o.addProperty("note", "A record was created; delete it or run the reset endpoint "
+                o.addProperty("note", "A record was created; delete it manually "
                         + "(auto-rollback does not delete, to avoid data loss).");
             } else if (a.kind().equals("update-unknown")) {
                 o.addProperty("note", "Original values were not captured; restore manually.");
@@ -856,7 +838,7 @@ public class BrowserAgent {
      */
     public void runRollback(AgentConfig cfg) {
         java.util.List<RollbackAction> plan = rollbackPlan();
-        if (plan.isEmpty() && cfg.restoreRequest.isBlank()) {
+        if (plan.isEmpty()) {
             log.accept("[rollback] Nothing recorded to roll back.");
             return;
         }
@@ -888,17 +870,6 @@ public class BrowserAgent {
                 } else {
                     manual++;   // created records are intentionally left as-is
                 }
-            }
-            RestoreSpec spec = parseRestore(cfg.restoreRequest);
-            if (spec != null) {
-                String url = spec.url().toLowerCase().startsWith("http") ? spec.url()
-                        : (origin == null ? spec.url()
-                           : origin + (spec.url().startsWith("/") ? spec.url() : "/" + spec.url()));
-                Object r = ((JavascriptExecutor) d).executeAsyncScript(
-                        "const cb=arguments[arguments.length-1];"
-                        + "fetch(arguments[0],{method:arguments[1],credentials:'include'})"
-                        + ".then(x=>cb(x.status)).catch(e=>cb('ERR:'+e));", url, spec.method());
-                log.accept("[rollback] reset " + spec.method() + " " + url + " -> " + r);
             }
             log.accept("[rollback] Done: " + restored + " edited record(s) restored to original"
                     + (manual > 0 ? ", " + manual + " created record(s) left as-is." : "."));
@@ -933,28 +904,9 @@ public class BrowserAgent {
         }
     }
 
-    // --- data restore (call an app reset endpoint) ---------------------------
+    // --- rollback login helpers ---------------------------------------------
 
-    /** Parsed restore request: an HTTP method + a URL. */
-    private record RestoreSpec(String method, String url) {
-    }
-
-    private static RestoreSpec parseRestore(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return null;
-        }
-        String s = raw.trim();
-        String method = "POST";
-        String url = s;
-        int sp = s.indexOf(' ');
-        if (sp > 0 && s.substring(0, sp).trim().toUpperCase().matches("GET|POST|PUT|PATCH|DELETE")) {
-            method = s.substring(0, sp).trim().toUpperCase();
-            url = s.substring(sp + 1).trim();
-        }
-        return url.isBlank() ? null : new RestoreSpec(method, url);
-    }
-
-    /** The admin account to use for restore (label/username hints at admin), else first. */
+    /** The admin account to use for rollback (label/username hints at admin), else first. */
     private static Account pickAdmin(java.util.List<Account> accounts) {
         for (Account a : accounts) {
             String l = (a.label() == null ? "" : a.label()).toLowerCase();
@@ -967,55 +919,7 @@ public class BrowserAgent {
         return accounts.isEmpty() ? null : accounts.get(0);
     }
 
-    /**
-     * Restore the target's data by calling its reset endpoint (e.g. POST /admin/reset)
-     * so anything created/edited during the crawl is returned to the seed state. Opens
-     * a browser, logs in as the admin account (a DETERMINISTIC maintenance login, kept
-     * separate from the AI-driven crawl login), then fires the request with the session
-     * cookie. Safe to call from the UI thread via a background thread.
-     */
-    public void restore(AgentConfig cfg) {
-        RestoreSpec spec = parseRestore(cfg.restoreRequest);
-        if (spec == null) {
-            log.accept("[restore] No restore request configured (e.g. 'POST /admin/reset').");
-            return;
-        }
-        String origin = originOf(cfg.targetUrl);
-        String url = spec.url().toLowerCase().startsWith("http") ? spec.url()
-                : (origin == null ? spec.url()
-                   : origin + (spec.url().startsWith("/") ? spec.url() : "/" + spec.url()));
-        ChromeDriver d = null;
-        try {
-            d = newDriver(cfg);
-            d.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(30));
-            d.manage().timeouts().scriptTimeout(Duration.ofSeconds(20));
-            d.get(cfg.targetUrl);
-            Account admin = pickAdmin(parseAccounts(cfg.prompt));
-            if (admin != null) {
-                log.accept("[restore] Logging in as '" + admin.display() + "' before reset.");
-                codeLoginForRestore(d, admin, origin);
-            }
-            Object r = ((JavascriptExecutor) d).executeAsyncScript(
-                    "const cb=arguments[arguments.length-1];"
-                    + "fetch(arguments[0],{method:arguments[1],credentials:'include'})"
-                    + ".then(x=>cb(x.status)).catch(e=>cb('ERR:'+e));",
-                    url, spec.method());
-            log.accept("[restore] " + spec.method() + " " + url + " -> " + r
-                    + " (if 2xx/3xx, data should be back to its seed state).");
-        } catch (RuntimeException e) {
-            log.accept("[restore] FAILED: " + shortMsg(e)
-                    + "  (is the target reachable via the proxy? is the reset URL correct?)");
-        } finally {
-            if (d != null) {
-                try {
-                    d.quit();
-                } catch (RuntimeException ignored) {
-                }
-            }
-        }
-    }
-
-    /** Minimal deterministic login for the restore step only (not the crawl). */
+    /** Minimal deterministic login for the rollback step only (not the crawl). */
     private void codeLoginForRestore(ChromeDriver d, Account acct, String origin) {
         try {
             if (firstShown(d.findElements(By.cssSelector("input[type=password]"))) == null
@@ -1144,7 +1048,7 @@ public class BrowserAgent {
         if (login != null) {
             sb.append(login).append("\n\n");
         }
-        String capDisp = cfg.maxSteps <= 0 ? "∞" : Integer.toString(cfg.maxSteps);
+        String capDisp = "∞";
         sb.append("STEP ").append(step).append(" / ").append(capDisp).append('\n');
         sb.append("CURRENT URL: ").append(url).append('\n');
         sb.append("TITLE: ").append(title).append('\n');
@@ -1511,7 +1415,7 @@ public class BrowserAgent {
             if (!inScope(n, targetHost) || frontier.contains(n)) {
                 continue;
             }
-            if (cfg.blockDestructive && isDestructiveUrl(n, extraBlock)) {
+            if (isDestructiveUrl(n, extraBlock)) {
                 continue;
             }
             String shape = PathTemplater.signature(n);
@@ -1591,27 +1495,6 @@ public class BrowserAgent {
     }
 
     // --- destructive-action guard ---
-
-    /** Compile the user's extra keywords into a word-boundary pattern (or null). */
-    private static Pattern compileExtra(String keywords) {
-        if (keywords == null || keywords.isBlank()) {
-            return null;
-        }
-        StringBuilder alt = new StringBuilder();
-        for (String k : keywords.split("[,\\s]+")) {
-            if (k.isBlank()) {
-                continue;
-            }
-            if (alt.length() > 0) {
-                alt.append('|');
-            }
-            alt.append(Pattern.quote(k.trim()));
-        }
-        if (alt.length() == 0) {
-            return null;
-        }
-        return Pattern.compile("(?i)(" + alt + ")");
-    }
 
     /** True if a URL contains a destructive token (or a user extra keyword). */
     private static boolean isDestructiveUrl(String url, Pattern extra) {

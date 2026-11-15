@@ -57,22 +57,14 @@ public class MapperTab {
     // Browser / proxy
     private final JTextField proxyHost = new JTextField("127.0.0.1");
     private final JTextField proxyPort = new JTextField("8080");
-    private final JTextField maxSteps = new JTextField("0");
     private final JTextField samplesPerShape = new JTextField("2");
     private final JTextField chromeBinary = new JTextField();
     private final JCheckBox headless = new JCheckBox("Headless browser");
     private final JCheckBox vision = new JCheckBox("Vision fallback (needs a vision-capable model)");
 
-    // Safety
-    private final JCheckBox blockDestructive =
-            new JCheckBox("Block destructive actions (delete / logout / reset / pay)", true);
-    private final JTextField extraBlockKeywords = new JTextField();
-
-    // Data restore / rollback (undo crawl mutations)
-    private final JCheckBox autoRollback =
-            new JCheckBox("Auto-rollback edited records to original when crawl finishes", true);
-    private final JTextField restoreRequest = new JTextField();
-    private final JCheckBox restoreAfterCrawl = new JCheckBox("Also auto-call the reset endpoint");
+    // Safety is always on (not configurable): destructive actions are blocked in code,
+    // and edited records are auto-rolled-back to their originals when the crawl finishes.
+    // The only control is a manual "Run rollback" button to re-run that rollback.
 
     // Export
     private final JTextField outputDir = new JTextField();
@@ -138,7 +130,6 @@ public class MapperTab {
         form.add(section("3. Browser & Burp proxy"));
         form.add(row("Proxy host", proxyHost));
         form.add(row("Proxy port", proxyPort));
-        form.add(row("Max steps (0 = crawl until complete)", maxSteps));
         form.add(row("Samples per URL shape", samplesPerShape));
         form.add(row("Chrome binary (optional)", chromeBinary));
         JPanel cb = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
@@ -146,26 +137,17 @@ public class MapperTab {
         cb.add(vision);
         form.add(cb);
 
-        form.add(section("4. Safety"));
-        JPanel sb = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        sb.add(blockDestructive);
-        form.add(sb);
-        form.add(row("Extra block keywords (optional)", extraBlockKeywords));
-        JPanel arb = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        arb.add(autoRollback);
-        form.add(arb);
-        form.add(row("Restore request (optional, e.g. POST /admin/reset)", restoreRequest));
+        form.add(section("4. Safety (always on)"));
+        JLabel safetyNote = new JLabel("<html>Destructive actions (delete / logout / reset / pay) "
+                + "are <b>always blocked</b> in code, and edited records are "
+                + "<b>auto-rolled-back</b> to their originals when the crawl finishes.</html>");
+        JPanel sn = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        sn.add(safetyNote);
+        form.add(sn);
         JPanel rb = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        rb.add(restoreAfterCrawl);
-        rb.add(javax.swing.Box.createHorizontalStrut(12));
-        JButton restoreNow = new JButton("Restore now");
-        restoreNow.setToolTipText("Log in as admin and call the Restore request to reset data");
-        restoreNow.addActionListener(e -> onRestore());
-        rb.add(restoreNow);
-        rb.add(javax.swing.Box.createHorizontalStrut(8));
         JButton rollbackNow = new JButton("Run rollback");
-        rollbackNow.setToolTipText("Undo recorded edits by re-submitting original values "
-                + "(any target); creates are listed for manual delete");
+        rollbackNow.setToolTipText("Re-run the rollback now: undo recorded edits by "
+                + "re-submitting their original values (created records are left for manual delete)");
         rollbackNow.addActionListener(e -> onRollback());
         rb.add(rollbackNow);
         form.add(rb);
@@ -234,34 +216,11 @@ public class MapperTab {
         cfg.maxTokens = parseInt(maxTokens.getText(), 0);
         cfg.proxyHost = proxyHost.getText().trim();
         cfg.proxyPort = parseInt(proxyPort.getText(), 8080);
-        cfg.maxSteps = parseInt(maxSteps.getText(), 60);
         cfg.samplesPerTemplate = parseInt(samplesPerShape.getText(), 2);
         cfg.chromeBinary = chromeBinary.getText().trim();
         cfg.headless = headless.isSelected();
         cfg.vision = vision.isSelected();
-        cfg.blockDestructive = blockDestructive.isSelected();
-        cfg.extraBlockKeywords = extraBlockKeywords.getText().trim();
-        cfg.restoreRequest = restoreRequest.getText().trim();
-        cfg.restoreAfterCrawl = restoreAfterCrawl.isSelected();
-        cfg.autoRollback = autoRollback.isSelected();
         return cfg;
-    }
-
-    /** Manually restore target data (log in as admin, call the Restore request). */
-    private void onRestore() {
-        AgentConfig cfg = buildConfig();
-        if (cfg.targetUrl.isBlank() || cfg.targetUrl.equals("https://")) {
-            log("[ui] Enter a Target URL first.");
-            return;
-        }
-        if (cfg.restoreRequest.isBlank()) {
-            log("[ui] Enter a Restore request first (e.g. 'POST /admin/reset').");
-            return;
-        }
-        savePrefs();
-        resolveLogFile();
-        log("[ui] Restoring target data via " + cfg.restoreRequest + " ...");
-        new Thread(() -> agent.restore(cfg), "ai-mapper-restore").start();
     }
 
     /** Undo recorded data changes (re-submit original values for edits) on any target. */
@@ -522,21 +481,10 @@ public class MapperTab {
             }
             setIf(p.getString("proxyHost"), proxyHost);
             setIf(p.getString("proxyPort"), proxyPort);
-            setIf(p.getString("maxSteps"), maxSteps);
             setIf(p.getString("samplesPerShape"), samplesPerShape);
             setIf(p.getString("chromeBinary"), chromeBinary);
             setIf(p.getString("temperature"), temperature);
             setIf(p.getString("maxTokens"), maxTokens);
-            setIf(p.getString("extraBlockKeywords"), extraBlockKeywords);
-            setIf(p.getString("restoreRequest"), restoreRequest);
-            Boolean rac = p.getBoolean("restoreAfterCrawl");
-            if (rac != null) {
-                restoreAfterCrawl.setSelected(rac);
-            }
-            Boolean arb = p.getBoolean("autoRollback");
-            if (arb != null) {
-                autoRollback.setSelected(arb);
-            }
             setIf(p.getString("outputDir"), outputDir);
             setIf(p.getString("hostFilter"), hostFilter);
             setIf(p.getString("groundTruth"), groundTruth);
@@ -548,10 +496,6 @@ public class MapperTab {
             Boolean vis = p.getBoolean("vision");
             if (vis != null) {
                 vision.setSelected(vis);
-            }
-            Boolean b = p.getBoolean("blockDestructive");
-            if (b != null) {
-                blockDestructive.setSelected(b);
             }
             Boolean s = p.getBoolean("inScopeOnly");
             if (s != null) {
@@ -575,22 +519,16 @@ public class MapperTab {
             p.setString("model", currentModel());
             p.setString("proxyHost", proxyHost.getText());
             p.setString("proxyPort", proxyPort.getText());
-            p.setString("maxSteps", maxSteps.getText());
             p.setString("samplesPerShape", samplesPerShape.getText());
             p.setString("chromeBinary", chromeBinary.getText());
             p.setString("temperature", temperature.getText());
             p.setString("maxTokens", maxTokens.getText());
-            p.setString("extraBlockKeywords", extraBlockKeywords.getText());
-            p.setString("restoreRequest", restoreRequest.getText());
-            p.setBoolean("restoreAfterCrawl", restoreAfterCrawl.isSelected());
-            p.setBoolean("autoRollback", autoRollback.isSelected());
             p.setString("outputDir", outputDir.getText());
             p.setString("hostFilter", hostFilter.getText());
             p.setString("groundTruth", groundTruth.getText());
             p.setString("logFile", logFile.getText());
             p.setBoolean("headless", headless.isSelected());
             p.setBoolean("vision", vision.isSelected());
-            p.setBoolean("blockDestructive", blockDestructive.isSelected());
             p.setBoolean("inScopeOnly", inScopeOnly.isSelected());
             p.setBoolean("targetHostOnly", targetHostOnly.isSelected());
         } catch (RuntimeException ignored) {
@@ -697,7 +635,6 @@ public class MapperTab {
             String header = "\n=== AI Mapper session " + java.time.LocalDateTime.now().withNano(0)
                     + " | target=" + targetUrl.getText().trim()
                     + " | model=" + currentModel()
-                    + " | maxSteps=" + maxSteps.getText().trim()
                     + " | samples=" + samplesPerShape.getText().trim() + " ===\n";
             java.nio.file.Files.writeString(logFilePath, header,
                     java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);

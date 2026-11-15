@@ -10,8 +10,9 @@ public class AgentConfig {
     // Where to start.
     public String targetUrl = "";
 
-    // Browsing behaviour.
-    public int maxSteps = 60;
+    // Browsing behaviour. The crawl ALWAYS runs until complete (no step cap) - it
+    // stops only when the frontier is drained or the user clicks Stop, with a high
+    // absolute safety ceiling in BrowserAgent as the only infinite-loop guard.
     public boolean headless = false;
     public String chromeBinary = "";   // optional explicit path to chrome/chromium/edge
     // How many URLs of the same shape (/products/{id}) to queue. Higher = more
@@ -21,26 +22,12 @@ public class AgentConfig {
     // screenshot to the LLM call (needs a vision-capable model). Off by default.
     public boolean vision = false;
 
-    // Safety: hard, code-level block on destructive actions (delete / logout /
-    // reset / pay / change security settings). On by default. This is enforced
-    // in the agent loop regardless of what the LLM decides, so it cannot be
-    // bypassed by a bad model reply or by the deterministic frontier jumps.
-    public boolean blockDestructive = true;
-    // Optional extra keywords (comma/space separated) to also treat as destructive.
-    public String extraBlockKeywords = "";
-
-    // Data restore: an app reset endpoint to call so data mutated during the crawl is
-    // returned to its seed state. Format: "METHOD url" (method optional, default POST),
-    // url absolute or relative to the target, e.g. "POST /admin/reset". Empty = off.
-    // The restore step logs in as the admin account (deterministically) first, since
-    // reset endpoints are usually admin-only.
-    public String restoreRequest = "";
-    public boolean restoreAfterCrawl = false;  // auto-call the reset endpoint when crawl finishes
-    // Auto-rollback: when the crawl finishes, automatically restore every record the
-    // agent EDITED back to its original values (re-submit the pre-edit values). Newly
-    // CREATED records are left as-is (not deleted). On by default so a pentest
-    // environment is returned to its prior state without any button click.
-    public boolean autoRollback = true;
+    // Safety is NOT configurable - these are always-on defaults enforced in code:
+    //  - destructive actions (delete / logout / reset / pay / ...) are ALWAYS blocked
+    //    in the agent loop, regardless of what the LLM decides;
+    //  - when the crawl finishes, every record the agent EDITED is ALWAYS rolled back
+    //    to its original values (black-box compensation; created records are left
+    //    as-is since a black-box crawler can't safely delete them).
 
     // Proxy = Burp's proxy listener.
     public String proxyHost = "127.0.0.1";
