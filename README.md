@@ -94,11 +94,12 @@ Chrome được bật `acceptInsecureCerts` + proxy = Burp, nên chấp nhận C
 Chặn hành động phá hoại là **guard ở tầng code, LUÔN bật** (không phải setting, không tắt được) — không chỉ lời dặn prompt, nên model có chọn nhầm cũng không chạy được:
 - **Không nạp vào frontier** URL có token phá hoại → các lệnh nhảy tự động (khi kẹt / khi model báo done sớm) **không bao giờ** đi vào `/delete`, `/logout`...
 - **Cổng chặn cuối trước khi thao tác:** mọi `goto`/`click`/`type` được kiểm tra lại; nếu URL / href / nhãn nút khớp mẫu phá hoại → **bỏ qua, không thực thi** và ghi log `BLOCKED destructive ...`.
-- Mẫu mặc định (ở đầu `BrowserAgent.java`: `DESTRUCTIVE_URL` / `DESTRUCTIVE_TEXT`): `delete, destroy, remove, drop, truncate, wipe, purge, erase, deactivate, revoke, logout, signout, reset` (URL) + `pay, checkout, place order, buy now, withdraw, transfer...` (nhãn nút).
-- Prompt cũng báo cho model biết các hành động này bị chặn để nó không phí bước.
-- Cuối phiên log ghi số hành động đã chặn.
+- **Chặn ở TẦNG FORM-SUBMIT (không chỉ nhãn nút):** mọi cách submit form đều được soi — click nút submit, **nhấn Enter trong một ô** (`type` + enter), hay click phần tử trong form. Guard đọc **chính form bị submit** (method + action + nhãn nút submit + tên field) và chặn nếu `method != GET` và (action khớp mẫu phá hoại ∨ nhãn submit khớp ∨ form có field thanh toán `card/cvv/iban/...`). → **Enter-submit một form thanh toán/xoá không còn lọt qua** (lỗ hổng cũ chỉ xét nút được click). Form `GET` (vd search) không bị chặn.
+- Mẫu mặc định (ở đầu `BrowserAgent.java`: `DESTRUCTIVE_URL` / `DESTRUCTIVE_TEXT` / `PAYMENT_FIELD`): `delete, destroy, remove, drop, truncate, wipe, purge, erase, deactivate, revoke, logout, signout, reset` (URL) + `pay, checkout, place order, buy now, withdraw, transfer...` (nhãn nút) + `card/cvv/cvc/iban/routing/account-number` (field thanh toán).
+- **Chế độ read-only (tùy chọn):** thêm `[read-only]` vào Task prompt → chặn **MỌI** submit non-GET (kể cả create/edit), chỉ còn GET + đọc — dùng khi crawl môi trường production. Endpoint vẫn được map nhờ harvest `form[action]` + trích từ JS (`js-endpoints.json`).
+- Model được báo các hành động này bị chặn; một action bị chặn > 3 lần thì **ngừng ghi log lặp**. Cuối phiên log ghi tổng số đã chặn.
 
-> ⚠️ Mẫu ưu tiên AN TOÀN hơn độ phủ: một trang chỉ-đọc có chữ "delete" trong path cũng bị chặn. Muốn sửa phạm vi thì chỉnh mẫu trong code (không có ô tắt trên UI).
+> ⚠️ Mẫu ưu tiên AN TOÀN hơn độ phủ: một trang chỉ-đọc có chữ "delete" trong path cũng bị chặn. Guard là **tất định ở code**, không hỏi LLM và không phụ thuộc path của site — xem thiết kế ở [research/07-guard-redesign.md](research/07-guard-redesign.md).
 
 ## Khôi phục dữ liệu sau crawl (rollback — LUÔN bật, chạy trên MỌI target)
 

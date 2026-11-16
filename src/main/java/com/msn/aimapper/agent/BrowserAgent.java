@@ -286,12 +286,45 @@ public class BrowserAgent {
             + "place\\s?order|confirm\\s?order|buy\\s?now|withdraw|transfer|"
             + "unsubscribe|cancel\\s?(account|subscription|order))\\b");
 
+    /** Field names that mark a PAYMENT form - submitting one is always blocked. */
+    private static final Pattern PAYMENT_FIELD = Pattern.compile(
+            "(?i)\\b(card(number|no)?|cc[-_]?num(ber)?|cvv|cvc|iban|routing|"
+            + "account[-_]?(no|number))\\b");
+
+    /**
+     * Report the ENCLOSING form of the element at a given {@code data-aimapper-idx} as
+     * {@code {method, action, submit, fields}} ("null" when there is none). This lets the
+     * guard judge a form SUBMISSION by the form itself, so a submit triggered by pressing
+     * Enter in a field - not just a click on the submit button - is caught too.
+     */
+    private static final String FORM_CONTEXT_JS = """
+            const el = document.querySelector('[data-aimapper-idx="' + arguments[0] + '"]');
+            if (!el) return 'null';
+            const f = el.closest('form');
+            if (!f) return 'null';
+            const subs = [];
+            f.querySelectorAll('button[type=submit],input[type=submit],input[type=image],button:not([type])')
+              .forEach(b => { const t = (b.innerText || b.value || '').trim(); if (t) subs.push(t); });
+            const fields = [];
+            f.querySelectorAll('input,select,textarea').forEach(x => {
+              if (x.name) fields.push(x.name);
+              const ty = (x.getAttribute('type') || '').toLowerCase(); if (ty) fields.push(ty);
+            });
+            return JSON.stringify({method: (f.getAttribute('method') || 'get').toUpperCase(),
+              action: f.getAttribute('action') || location.pathname,
+              submit: subs.join(' '), fields: fields.join(' ')});""";
+
     private final Consumer<String> log;
     private final CoverageSource coverage;   // live proxy coverage (may be null)
     private volatile boolean stop;
     private volatile boolean running;         // true while a crawl run() is executing
     private volatile ChromeDriver driver;
     private volatile boolean passLoggedIn;    // did the code login succeed for the current pass
+    private volatile boolean readOnlyMode;    // [read-only] in prompt: block ALL non-GET form submits
+    // How many times each action signature was blocked, to silence repeated BLOCKED logs
+    // when the model keeps re-choosing the same blocked control.
+    private final java.util.Map<String, Integer> blockedCount =
+            new java.util.concurrent.ConcurrentHashMap<>();
     private volatile String targetHostField; // host of the current run, for coverage lookup
     private volatile int samplesPerTemplate = SAMPLES_PER_TEMPLATE; // from cfg at run start
     private volatile boolean visionNoted;     // log vision-fallback use only once
@@ -440,9 +473,18 @@ public class BrowserAgent {
             samplesPerTemplate = cfg.samplesPerTemplate > 0
                     ? cfg.samplesPerTemplate : SAMPLES_PER_TEMPLATE;
             Pattern extraBlock = null; // destructive blocking uses the built-in pattern only
+            blockedCount.clear();
+            readOnlyMode = cfg.prompt != null
+                    && cfg.prompt.toLowerCase().matches("(?s).*\\[\\s*read[- ]?only\\s*\\].*");
             log.accept("[agent] SAFETY: destructive actions (delete/logout/reset/"
-                    + "pay/...) are BLOCKED in code - the agent cannot delete data, "
-                    + "log out, or pay even if the model tries.");
+                    + "pay/...) are BLOCKED in code - at CLICK, GOTO and FORM-SUBMIT level "
+                    + "(incl. submit-by-Enter) - the agent cannot delete data, log out, or "
+                    + "pay even if the model tries.");
+            if (readOnlyMode) {
+                log.accept("[agent] READ-ONLY mode ('[read-only]' in the Task prompt): EVERY "
+                        + "non-GET form submission (create/edit/delete/pay) is blocked - only GET "
+                        + "navigation and reading. Endpoints are still mapped from forms/JS.");
+            }
 
             // The crawl ALWAYS runs until complete: it stops only when the frontier is
             // drained (no unvisited links left) or the user clicks Stop, with a high
@@ -707,10 +749,20 @@ public class BrowserAgent {
                     // the model decided. The signature is already in `done`, so it
                     // is listed under ALREADY DONE and won't be re-suggested as new.
                     String blockReason = destructiveReason(act, type, elems, extraBlock);
+                    if (blockReason == null) {
+                        // Also judge the ENCLOSING form of a submission (click submit / type+Enter
+                        // / in-form click), so a destructive submit triggered by Enter - not just a
+                        // click on the button - is caught. Enforces read-only mode too.
+                        blockReason = destructiveSubmitReason(type, act, elems);
+                    }
                     if (blockReason != null) {
                         blocked++;
-                        log.accept("[agent] BLOCKED destructive " + type + " (" + blockReason
-                                + ") - skipped, not executed.");
+                        int n = blockedCount.merge(sig, 1, Integer::sum);
+                        if (n <= 3) {
+                            log.accept("[agent] BLOCKED destructive " + type + " (" + blockReason
+                                    + ") - skipped, not executed."
+                                    + (n == 3 ? " (further identical blocks silenced)" : ""));
+                        }
                     } else {
                         recent.add(type + describe(action));
                         while (recent.size() > 8) {
@@ -1695,6 +1747,68 @@ public class BrowserAgent {
             }
         }
         return null;
+    }
+
+    /**
+     * Block a destructive FORM SUBMISSION however it is triggered - clicking the submit
+     * button, pressing Enter in a field, or any in-form click. It reads the ENCLOSING
+     * form of the target element and judges the FORM (method + action + submit label +
+     * payment fields), not just the clicked control, so the Enter-submit path can no
+     * longer bypass the guard. Also enforces read-only mode. Returns a reason to block,
+     * or null to allow. Only a 'type' with enter=true, or a 'click', can submit.
+     */
+    private String destructiveSubmitReason(String type, JsonObject a,
+                                           java.util.List<JsonObject> elems) {
+        if (!("click".equals(type) || "type".equals(type)) || a == null || !a.has("index")) {
+            return null;
+        }
+        // A plain 'type' into a field is harmless; it only submits when it presses Enter.
+        if ("type".equals(type) && !(a.has("enter") && getBool(a, "enter"))) {
+            return null;
+        }
+        int idx;
+        try {
+            idx = a.get("index").getAsInt();
+        } catch (RuntimeException e) {
+            return null;
+        }
+        JsonObject ctx = formContext(idx);
+        if (ctx == null) {
+            return null; // the target is not inside a form -> not a submission
+        }
+        String method = getStr(ctx, "method", "GET");
+        if ("GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method)) {
+            return null; // a GET form (e.g. search) does not change state
+        }
+        String action = getStr(ctx, "action", "");
+        String submit = getStr(ctx, "submit", "");
+        String fields = getStr(ctx, "fields", "");
+        if (readOnlyMode) {
+            return "read-only: " + method + " submit " + trunc(action, 50);
+        }
+        if (isDestructiveUrl(action, null)) {
+            return "form action=" + trunc(action, 60);
+        }
+        if (!submit.isBlank() && DESTRUCTIVE_TEXT.matcher(submit).find()) {
+            return "submit button='" + trunc(submit, 50) + "'";
+        }
+        if (!fields.isBlank() && PAYMENT_FIELD.matcher(fields).find()) {
+            return "payment form (" + method + " " + trunc(action, 46) + ")";
+        }
+        return null;
+    }
+
+    /** The enclosing form context of the element at {@code data-aimapper-idx}, or null. */
+    private JsonObject formContext(int idx) {
+        try {
+            Object r = ((JavascriptExecutor) driver).executeScript(FORM_CONTEXT_JS, idx);
+            if (r == null || "null".equals(r.toString())) {
+                return null;
+            }
+            return JsonParser.parseString(r.toString()).getAsJsonObject();
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     /** Resolve the element an action's index points at, or null. */
