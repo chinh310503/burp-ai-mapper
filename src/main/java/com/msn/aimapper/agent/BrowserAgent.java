@@ -286,10 +286,15 @@ public class BrowserAgent {
             + "place\\s?order|confirm\\s?order|buy\\s?now|withdraw|transfer|"
             + "unsubscribe|cancel\\s?(account|subscription|order))\\b");
 
-    /** Field names that mark a PAYMENT form - submitting one is always blocked. */
+    /**
+     * Field names that mark a PAYMENT-INSTRUMENT form (a card is being charged) - these
+     * are the real "money leaves now" signal, so submitting one is always blocked. NOTE:
+     * {@code iban}/{@code account-number} are deliberately NOT here - they also appear in
+     * benign "add a payee / beneficiary" forms; a money-MOVING form (transfer/withdraw) is
+     * caught by its submit-button label instead, not by having an IBAN field.
+     */
     private static final Pattern PAYMENT_FIELD = Pattern.compile(
-            "(?i)\\b(card(number|no)?|cc[-_]?num(ber)?|cvv|cvc|iban|routing|"
-            + "account[-_]?(no|number))\\b");
+            "(?i)\\b(card(number|no|num)?|cc[-_]?num(ber)?|cvv|cvc|security[-_]?code)\\b");
 
     /**
      * Report the ENCLOSING form of the element at a given {@code data-aimapper-idx} as
@@ -873,6 +878,12 @@ public class BrowserAgent {
             String action = resolveUrl(getStr(f, "action", ""), pageUrl);
             java.util.LinkedHashMap<String, String> after =
                     toMap(f.has("fields") ? f.getAsJsonObject("fields") : null);
+            // Never record (or later re-submit) a rollback for a destructive form - a
+            // logout/delete form is blocked, not a data change - nor for a form with no
+            // data fields (e.g. the header logout form mis-picked as the "best" form).
+            if (action.isBlank() || after.isEmpty() || isDestructiveUrl(action, null)) {
+                return;
+            }
             java.util.LinkedHashMap<String, String> originals = formBefore.get(action);
             if (originals == null) {
                 originals = formBefore.get(resolveUrl("", pageUrl));
