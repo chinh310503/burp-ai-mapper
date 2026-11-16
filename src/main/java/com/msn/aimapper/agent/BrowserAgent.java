@@ -489,21 +489,18 @@ public class BrowserAgent {
                     + (acct != null ? "  (account: " + acct.display() + ")" : ""));
             gotoUrl(cfg.targetUrl);
 
-            // Deterministic code login for THIS account, so every privilege tier reliably
-            // signs in (LLM typing into element indices is flaky). A tier that cannot log
-            // in cannot have its account-specific features crawled, so we say so loudly
-            // rather than silently missing them.
+            // Sign in with a deterministic code fill, reached through the SITE'S OWN links
+            // (no guessed URL path): if the login form is directly reachable from the
+            // landing page we log in now; otherwise the crawl will navigate to it via the
+            // site's links and the in-loop handler fills it wherever it appears. The code
+            // fill is reliable (LLM typing into element indices is flaky).
             if (acct != null) {
-                log.accept("[agent] Logging in as '" + acct.display()
-                        + "' (deterministic code login) before exploring...");
-                passLoggedIn = codeLogin(driver, acct, originOf(cfg.targetUrl));
+                log.accept("[agent] Account '" + acct.display() + "': will sign in by code "
+                        + "when the login form is reached (found via the site's own links).");
+                passLoggedIn = codeLogin(driver, acct);
                 if (passLoggedIn) {
                     log.accept("[agent] Logged in as '" + acct.display() + "'.");
                     gotoUrl(cfg.targetUrl); // land on an authenticated page before exploring
-                } else {
-                    log.accept("[agent] WARNING: could NOT log in as '" + acct.display()
-                            + "'. Its account-specific features will NOT be crawled - check "
-                            + "this account's credentials in the Task prompt.");
                 }
             }
 
@@ -514,7 +511,8 @@ public class BrowserAgent {
             Deque<String> recent = new ArrayDeque<>();
             int noProgress = 0;                                     // steps without anything new
             int blocked = 0;                                        // destructive actions blocked
-            int loginStreak = 0;                                    // consecutive steps stuck on a login page
+            int loginTries = 0;                                     // code-fill login attempts this pass
+            boolean loginGaveUp = false;                            // login failed; stop retrying it
             boolean completed = false;                              // true if the pass finished naturally
 
             seedFromSiteFiles(cfg, targetHost, frontier, shapeSeen, extraBlock);
@@ -577,14 +575,35 @@ public class BrowserAgent {
                 String state = buildStatePrompt(cfg, url, title, elementsJson, visited, done,
                         frontier, recent, step);
 
-                // If we keep landing on a login page, don't let the model burn expensive
-                // steps re-submitting forever: after a few tries, steer it to explore.
+                // Whenever the crawl reaches a login form (detected by its STRUCTURE - a
+                // password field - however the agent got here), sign in by code instead of
+                // letting the LLM fumble with element indices. This is what makes every
+                // account reliably log in without guessing any login URL.
                 boolean onLoginPage = loginHint(elems) != null;
-                loginStreak = onLoginPage ? loginStreak + 1 : 0;
-                if (acct != null && loginStreak > LOGIN_RETRY_LIMIT) {
-                    state += "\n\nNOTE: Login has not succeeded after several attempts. STOP "
-                            + "retrying the login now. Instead pick an UNVISITED link from the "
-                            + "list and continue exploring the pages this account can reach.";
+                if (acct != null && !passLoggedIn && onLoginPage && !loginGaveUp) {
+                    loginTries++;
+                    if (loginTries > LOGIN_RETRY_LIMIT) {
+                        loginGaveUp = true;
+                        log.accept("[agent] WARNING: could NOT log in as '" + acct.display()
+                                + "' after " + LOGIN_RETRY_LIMIT + " tries at the login form. Its "
+                                + "account-specific features will NOT be crawled - check the "
+                                + "credentials. Continuing with pages reachable without login.");
+                    } else {
+                        log.accept("[agent] Login form reached -> signing in as '" + acct.display()
+                                + "' (code fill, try " + loginTries + ").");
+                        fillLoginForm(driver, acct);
+                        passLoggedIn = isLoggedIn(driver);
+                        if (passLoggedIn) {
+                            log.accept("[agent] Logged in as '" + acct.display() + "'.");
+                        }
+                        noProgress = 0;
+                        sleep(300);
+                        continue; // re-read the page (now authenticated) on the next step
+                    }
+                }
+                if (acct != null && loginGaveUp && onLoginPage) {
+                    state += "\n\nNOTE: Login did not succeed; do NOT keep trying to log in. "
+                            + "Explore the pages available without logging in instead.";
                 }
 
                 String reply;
@@ -913,7 +932,6 @@ public class BrowserAgent {
             log.accept("[rollback] Nothing recorded to roll back.");
             return;
         }
-        String origin = originOf(cfg.targetUrl);
         ChromeDriver d = null;
         try {
             d = newDriver(cfg);
@@ -923,7 +941,7 @@ public class BrowserAgent {
             Account admin = pickAdmin(parseAccounts(cfg.prompt));
             if (admin != null) {
                 log.accept("[rollback] Logging in as '" + admin.display() + "' before rollback.");
-                codeLoginForRestore(d, admin, origin);
+                codeLoginForRestore(d, admin);
             }
             int restored = 0;
             int manual = 0;
@@ -991,124 +1009,29 @@ public class BrowserAgent {
     }
 
     /**
-     * Deterministic code login for a crawl pass: fill the username + password fields and
-     * submit, retrying a few times, then verify. Returns true if we end up logged in
-     * (left the login page and no password field remains). This makes every account
-     * actually sign in so its tier-specific features get crawled, instead of relying on
-     * the LLM typing into element indices.
+     * Sign in NOW if a login form is directly reachable from the current page - either it
+     * is already showing, or a login / sign-in LINK on the page leads to it (the site's
+     * own navigation, NEVER a guessed URL path). If login is not reachable yet, returns
+     * false; the crawl reaches the login form through the site's links and the in-loop
+     * handler fills it wherever it appears.
      */
-    private boolean codeLogin(ChromeDriver d, Account acct, String origin) {
-        for (int attempt = 1; attempt <= 3 && !stop; attempt++) {
-            try {
-                WebElement pw = firstShown(d.findElements(By.cssSelector("input[type=password]")));
-                if (pw == null) {
-                    navigateToLoginPage(d, origin);
-                    pw = firstShown(d.findElements(By.cssSelector("input[type=password]")));
-                }
-                if (pw == null) {
-                    return isLoggedIn(d); // no login form found; maybe already signed in
-                }
-                WebElement user = firstShown(d.findElements(By.cssSelector(
-                        "input[type=email],input[name*=user i],input[name*=email i],"
-                        + "input[name*=login i],input[type=text]")));
-                if (user != null) {
-                    try {
-                        user.clear();
-                    } catch (RuntimeException ignored) {
-                    }
-                    user.sendKeys(acct.username());
-                }
-                try {
-                    pw.clear();
-                } catch (RuntimeException ignored) {
-                }
-                pw.sendKeys(acct.password());
-                pw.sendKeys(Keys.RETURN);
-                waitReady(d);
-                sleep(600);
-                if (isLoggedIn(d)) {
-                    return true;
-                }
-            } catch (RuntimeException e) {
-                log.accept("[agent] login attempt " + attempt + " failed: " + shortMsg(e));
-            }
+    private boolean codeLogin(ChromeDriver d, Account acct) {
+        if (firstShown(d.findElements(By.cssSelector("input[type=password]"))) == null) {
+            followLoginLink(d);
         }
-        return isLoggedIn(d);
+        if (firstShown(d.findElements(By.cssSelector("input[type=password]"))) == null) {
+            return false; // no login form reachable from here yet; the crawl will find it
+        }
+        fillLoginForm(d, acct);
+        return isLoggedIn(d); // after the submit, no password field remaining = signed in
     }
 
-    /** Heuristic: logged in when not on a login page and no visible password field remains. */
-    private boolean isLoggedIn(ChromeDriver d) {
+    /** Fill the visible login form (username + password) and submit. Used wherever a login
+     *  form is detected, by the pass-start sign-in and by the in-loop handler. */
+    private void fillLoginForm(ChromeDriver d, Account acct) {
         try {
-            String u = d.getCurrentUrl();
-            String lu = u == null ? "" : u.toLowerCase();
-            boolean onLogin = lu.matches(".*(login|log-in|signin|sign-in|/auth/|session/new).*");
-            boolean hasPw = firstShown(d.findElements(By.cssSelector("input[type=password]"))) != null;
-            return !onLogin && !hasPw;
-        } catch (RuntimeException e) {
-            return false;
-        }
-    }
-
-    /**
-     * Best-effort, site-agnostic navigation to a login form: follow a login / sign-in
-     * link on the current page if there is one, otherwise try a set of common login
-     * paths, stopping as soon as a password field appears. No single path is assumed.
-     */
-    private void navigateToLoginPage(ChromeDriver d, String origin) {
-        // 1) A link on the current page that points at a login / sign-in page.
-        try {
-            for (WebElement a : d.findElements(By.cssSelector("a[href]"))) {
-                String href = safe(() -> a.getAttribute("href"), "");
-                String text = safe(a::getText, "");
-                String hay = (href + " " + text).toLowerCase();
-                if (hay.contains("logout") || hay.contains("sign-out") || hay.contains("signout")) {
-                    continue; // never follow a logout link
-                }
-                if (hay.matches(".*(login|log-in|signin|sign-in|sign in|/auth).*")) {
-                    try {
-                        a.click();
-                        waitReady(d);
-                    } catch (RuntimeException ignored) {
-                    }
-                    if (firstShown(d.findElements(By.cssSelector("input[type=password]"))) != null) {
-                        return;
-                    }
-                    break;
-                }
-            }
-        } catch (RuntimeException ignored) {
-        }
-        // 2) Common login paths (conventions across frameworks), password field = done.
-        if (origin == null) {
-            return;
-        }
-        for (String p : new String[]{"/login", "/signin", "/sign-in", "/account/login",
-                "/auth/login", "/users/sign_in", "/user/login", "/session/new"}) {
-            if (firstShown(d.findElements(By.cssSelector("input[type=password]"))) != null) {
-                return;
-            }
-            try {
-                d.get(origin + p);
-                waitReady(d);
-            } catch (RuntimeException ignored) {
-            }
-        }
-    }
-
-    /** Minimal deterministic login for the rollback step only (not the crawl). */
-    private void codeLoginForRestore(ChromeDriver d, Account acct, String origin) {
-        try {
-            if (firstShown(d.findElements(By.cssSelector("input[type=password]"))) == null
-                    && origin != null) {
-                try {
-                    d.get(origin + "/login");
-                    waitReady(d);
-                } catch (RuntimeException ignored) {
-                }
-            }
-            WebElement pwf = firstShown(d.findElements(By.cssSelector("input[type=password]")));
-            if (pwf == null) {
-                log.accept("[restore] No login form found; trying the reset without login.");
+            WebElement pw = firstShown(d.findElements(By.cssSelector("input[type=password]")));
+            if (pw == null) {
                 return;
             }
             WebElement user = firstShown(d.findElements(By.cssSelector(
@@ -1122,15 +1045,68 @@ public class BrowserAgent {
                 user.sendKeys(acct.username());
             }
             try {
-                pwf.clear();
+                pw.clear();
             } catch (RuntimeException ignored) {
             }
-            pwf.sendKeys(acct.password());
-            pwf.sendKeys(Keys.RETURN);
+            pw.sendKeys(acct.password());
+            pw.sendKeys(Keys.RETURN);
             waitReady(d);
+            sleep(600);
         } catch (RuntimeException e) {
-            log.accept("[restore] login step failed: " + shortMsg(e));
+            log.accept("[agent] login fill failed: " + shortMsg(e));
         }
+    }
+
+    /**
+     * Follow a login / sign-in LINK on the current page to reach the login form - the way
+     * a real user does, using the site's own navigation. Never follows a logout link and
+     * never guesses a URL path; if there is no login link here, the crawl will reach the
+     * login form by following the site's links like any other page.
+     */
+    private void followLoginLink(ChromeDriver d) {
+        try {
+            for (WebElement a : d.findElements(By.cssSelector("a[href]"))) {
+                String href = safe(() -> a.getAttribute("href"), "");
+                String text = safe(a::getText, "");
+                String hay = (href + " " + text).toLowerCase();
+                if (hay.contains("logout") || hay.contains("log-out")
+                        || hay.contains("signout") || hay.contains("sign-out")) {
+                    continue; // never follow a logout link
+                }
+                if (hay.matches(".*(log\\s?in|sign\\s?in|/auth|authenticate).*")) {
+                    try {
+                        a.click();
+                        waitReady(d);
+                    } catch (RuntimeException ignored) {
+                    }
+                    return; // only follow the first login-looking link
+                }
+            }
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    /** Heuristic: logged in when no visible password field remains and we are not sitting
+     *  on a login form (verified by structure, not by a specific URL path). */
+    private boolean isLoggedIn(ChromeDriver d) {
+        try {
+            return firstShown(d.findElements(By.cssSelector("input[type=password]"))) == null;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** Deterministic admin login for the rollback step (reuses the same form detection as
+     *  the crawl: follow a login link if needed, then fill the form - no guessed path). */
+    private void codeLoginForRestore(ChromeDriver d, Account acct) {
+        if (firstShown(d.findElements(By.cssSelector("input[type=password]"))) == null) {
+            followLoginLink(d);
+        }
+        if (firstShown(d.findElements(By.cssSelector("input[type=password]"))) == null) {
+            log.accept("[restore] No login form found; trying the reset without login.");
+            return;
+        }
+        fillLoginForm(d, acct);
     }
 
     private static WebElement firstShown(java.util.List<WebElement> els) {
