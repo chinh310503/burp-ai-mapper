@@ -1826,11 +1826,16 @@ public class BrowserAgent {
             String label = (el != null ? getStr(el, "text", "") : "").trim();
             String etype = el != null ? getStr(el, "type", "") : "";
             String low = label.toLowerCase();
+            // A click on a navigation LINK (it has an href) is NOT a form submit. Without
+            // this, link labels like "All posts" (matches "post") or "Register" were
+            // mis-read as data changes, and recordRollback then picked the page's search
+            // box as the "best form" and logged a bogus UPDATE re-POSTing /search.
+            boolean isLink = el != null && !getStr(el, "href", "").isBlank();
             boolean authOrSearch = low.matches(".*(sign\\s?in|log\\s?in|login|search).*");
-            boolean mutating = !authOrSearch && (!formData.isEmpty()
+            boolean mutating = !authOrSearch && !isLink && (!formData.isEmpty()
                     || "submit".equalsIgnoreCase(etype)
-                    || low.matches(".*(save|create|update|add|send|submit|post|register|"
-                        + "place\\s?order|confirm).*"));
+                    || low.matches(".*\\b(save|create|update|add|send|submit|register|"
+                        + "place\\s?order|confirm)\\b.*"));
             if (mutating) {
                 String page = formPage != null ? formPage : url;
                 log.accept("[agent] DATA CHANGE: submitted form on " + page
