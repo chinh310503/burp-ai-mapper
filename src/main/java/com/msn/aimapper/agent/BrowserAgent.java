@@ -1001,16 +1001,12 @@ public class BrowserAgent {
         for (int attempt = 1; attempt <= 3 && !stop; attempt++) {
             try {
                 WebElement pw = firstShown(d.findElements(By.cssSelector("input[type=password]")));
-                if (pw == null && origin != null) {
-                    try {
-                        d.get(origin + "/login");
-                        waitReady(d);
-                    } catch (RuntimeException ignored) {
-                    }
+                if (pw == null) {
+                    navigateToLoginPage(d, origin);
                     pw = firstShown(d.findElements(By.cssSelector("input[type=password]")));
                 }
                 if (pw == null) {
-                    return isLoggedIn(d); // no login form in sight; maybe already signed in
+                    return isLoggedIn(d); // no login form found; maybe already signed in
                 }
                 WebElement user = firstShown(d.findElements(By.cssSelector(
                         "input[type=email],input[name*=user i],input[name*=email i],"
@@ -1044,11 +1040,58 @@ public class BrowserAgent {
     private boolean isLoggedIn(ChromeDriver d) {
         try {
             String u = d.getCurrentUrl();
-            boolean onLogin = u != null && u.toLowerCase().contains("/login");
+            String lu = u == null ? "" : u.toLowerCase();
+            boolean onLogin = lu.matches(".*(login|log-in|signin|sign-in|/auth/|session/new).*");
             boolean hasPw = firstShown(d.findElements(By.cssSelector("input[type=password]"))) != null;
             return !onLogin && !hasPw;
         } catch (RuntimeException e) {
             return false;
+        }
+    }
+
+    /**
+     * Best-effort, site-agnostic navigation to a login form: follow a login / sign-in
+     * link on the current page if there is one, otherwise try a set of common login
+     * paths, stopping as soon as a password field appears. No single path is assumed.
+     */
+    private void navigateToLoginPage(ChromeDriver d, String origin) {
+        // 1) A link on the current page that points at a login / sign-in page.
+        try {
+            for (WebElement a : d.findElements(By.cssSelector("a[href]"))) {
+                String href = safe(() -> a.getAttribute("href"), "");
+                String text = safe(a::getText, "");
+                String hay = (href + " " + text).toLowerCase();
+                if (hay.contains("logout") || hay.contains("sign-out") || hay.contains("signout")) {
+                    continue; // never follow a logout link
+                }
+                if (hay.matches(".*(login|log-in|signin|sign-in|sign in|/auth).*")) {
+                    try {
+                        a.click();
+                        waitReady(d);
+                    } catch (RuntimeException ignored) {
+                    }
+                    if (firstShown(d.findElements(By.cssSelector("input[type=password]"))) != null) {
+                        return;
+                    }
+                    break;
+                }
+            }
+        } catch (RuntimeException ignored) {
+        }
+        // 2) Common login paths (conventions across frameworks), password field = done.
+        if (origin == null) {
+            return;
+        }
+        for (String p : new String[]{"/login", "/signin", "/sign-in", "/account/login",
+                "/auth/login", "/users/sign_in", "/user/login", "/session/new"}) {
+            if (firstShown(d.findElements(By.cssSelector("input[type=password]"))) != null) {
+                return;
+            }
+            try {
+                d.get(origin + p);
+                waitReady(d);
+            } catch (RuntimeException ignored) {
+            }
         }
     }
 
@@ -1826,13 +1869,17 @@ public class BrowserAgent {
             String label = (el != null ? getStr(el, "text", "") : "").trim();
             String etype = el != null ? getStr(el, "type", "") : "";
             String low = label.toLowerCase();
-            // A click on a navigation LINK (it has an href) is NOT a form submit. Without
-            // this, link labels like "All posts" (matches "post") or "Register" were
-            // mis-read as data changes, and recordRollback then picked the page's search
-            // box as the "best form" and logged a bogus UPDATE re-POSTing /search.
-            boolean isLink = el != null && !getStr(el, "href", "").isBlank();
+            // A click on a navigation LINK (a real href target) is NOT a form submit.
+            // Without this, link labels like "All posts" (contains "post") or "Register"
+            // were mis-read as data changes, and recordRollback then picked the page's
+            // search box as the "best form" and logged a bogus UPDATE re-POSTing /search.
+            // href="#" / javascript: are NOT navigation, so a submit styled as such a link
+            // is still treated as a possible data change.
+            String href = el != null ? getStr(el, "href", "") : "";
+            boolean isNavLink = !href.isBlank() && !href.equals("#")
+                    && !href.toLowerCase().startsWith("javascript:");
             boolean authOrSearch = low.matches(".*(sign\\s?in|log\\s?in|login|search).*");
-            boolean mutating = !authOrSearch && !isLink && (!formData.isEmpty()
+            boolean mutating = !authOrSearch && !isNavLink && (!formData.isEmpty()
                     || "submit".equalsIgnoreCase(etype)
                     || low.matches(".*\\b(save|create|update|add|send|submit|register|"
                         + "place\\s?order|confirm)\\b.*"));
